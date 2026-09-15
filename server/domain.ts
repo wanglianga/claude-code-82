@@ -230,9 +230,14 @@ export function createBooking(db: DB, userId: string, req: {
   }
   if (req.kind === 'group' && partySize < 5) throw new HttpError(400, '团体预约不少于 5 人');
 
-  // 泳道/锁区冲突
+  // 泳道/锁区冲突（对居民不回显机构名称，避免错误消息旁路泄露第三方信息）
   const { hits: lockHits } = zoneLocked(db, session, req.zoneId, req.lane);
-  if (lockHits.length) throw new HttpError(409, `该泳道/区域已被锁定：${lockHits.map((l) => l.title).join('；')}`);
+  if (lockHits.length) {
+    const detail = user.role === 'resident'
+      ? '该泳道/区域当前时段已被占用，请改选其他泳道、泳区或场次'
+      : lockHits.map((l) => l.title).join('；');
+    throw new HttpError(409, `该泳道/区域已被锁定：${detail}`);
+  }
 
   const { seats: locked } = zoneLocked(db, session, req.zoneId);
   const { inPool, booked } = zoneCounts(db, req.sessionId, req.zoneId);
@@ -283,7 +288,12 @@ export function createBooking(db: DB, userId: string, req: {
       capacity: partySize, isCommercial: true, bookingId: booking.id,
     };
     session.locks.push(lock);
-    conflictWarnings = lockConflicts(db, session, lock);
+    session.locks.push(lock);
+    const rawConflicts = lockConflicts(db, session, lock);
+    // 机构账号本身是居民角色：可获知冲突与挤压人数，但不回显其他居民预约码
+    conflictWarnings = user.role === 'resident'
+      ? rawConflicts.map((m) => m.replace(/B-\d{4}/g, '居民预约'))
+      : rawConflicts;
     pushNotification(db, {
       title: `商业包场申请：${req.orgName}（${session.label}）`,
       body: `包场 ${zone.name} ${partySize} 人，联系人 ${req.contactName}。${conflictWarnings.length ? '检测到冲突：' + conflictWarnings.join('；') : '无直接冲突。'}`,

@@ -7,9 +7,10 @@ import type {
 } from '../shared/types.js';
 import { getDB, mutate, nextId } from './store.js';
 import {
-  HttpError, liveBoard, sessionDetail, conflictSummary, createBooking, checkIn,
+  HttpError, sessionDetail, createBooking, checkIn,
   addWaterReading, addPatrolIssue, openIncident, changePoolStatus, lockConflicts,
 } from './domain.js';
+import { buildStateView, sanitizeSessionDetail, visibleConflictsFor } from './views.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 4000);
@@ -63,34 +64,20 @@ app.post('/api/auth/login', (req, res) => {
 
 app.get('/api/me', auth, (req, res) => {
   const user = (req as any).user as User;
-  res.json({ user: sanitizeUser(user), zoneConflicts: conflictSummary(getDB()) });
+  res.json({ user: sanitizeUser(user), zoneConflicts: visibleConflictsFor(getDB(), user.role) });
 });
 
-// ============ 全量状态（前端轮询，保证多端看到同一份事实） ============
-app.get('/api/state', auth, (_req, res) => {
-  const db = getDB();
-  res.json({
-    users: db.users.map(sanitizeUser),
-    zones: db.zones,
-    sessions: db.sessions,
-    bookings: db.bookings,
-    waterReadings: db.waterReadings,
-    equipment: db.equipment,
-    guardDuties: db.guardDuties,
-    patrolIssues: db.patrolIssues,
-    incidents: db.incidents,
-    workTasks: db.workTasks,
-    complaints: db.complaints,
-    notifications: db.notifications,
-    walletTxns: db.walletTxns,
-    lessons: db.lessons,
-    boards: db.sessions.map((s) => liveBoard(db, s.id)),
-    conflicts: conflictSummary(db),
-  });
+// ============ 状态快照：服务端按会话用户角色裁剪，前端不做脱敏替代 ============
+app.get('/api/state', auth, (req, res) => {
+  const user = (req as any).user as User;
+  res.json(buildStateView(getDB(), user));
 });
 
 // ============ 场次 ============
-app.get('/api/sessions/:id', auth, (req, res) => res.json(sessionDetail(getDB(), req.params.id)));
+app.get('/api/sessions/:id', auth, (req, res) => {
+  const user = (req as any).user as User;
+  res.json(sanitizeSessionDetail(sessionDetail(getDB(), req.params.id), user));
+});
 
 // ============ 预约 ============
 app.post('/api/bookings', auth, roles('resident', 'ops', 'frontdesk'), (req, res) => {

@@ -498,3 +498,34 @@ export interface Me {
   user: User;
   zoneConflicts: { sessionId: string; sessionLabel: string; message: string }[];
 }
+
+// ============ 服务端按角色裁剪后的状态视图（/api/state） ============
+/** 对外最小人员卡片：绝不含余额、补偿券、密码、年龄等 PII */
+export interface PatronCard {
+  id: string;
+  name: string;
+  role: Role;
+  phone?: string;
+  memberTier?: MemberTier;
+  deepCert?: boolean;
+}
+
+export interface StateView {
+  viewerRole: Role;
+  users: PatronCard[];
+  zones: Zone[];
+  sessions: Session[];
+  bookings: Booking[];
+  waterReadings: WaterReading[];
+  equipment: Equipment[];
+  guardDuties: GuardDuty[];
+  patrolIssues: PatrolIssue[];
+  incidents: Incident[];
+  workTasks: WorkTask[];
+  complaints: Complaint[];
+  notifications: Notification[];
+  walletTxns: WalletTxn[];
+  lessons: CoachingLesson[];
+  boards: LiveBoard[];
+  conflicts: { sessionId: string; sessionLabel: string; message: string }[];
+}

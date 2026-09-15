@@ -2,7 +2,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import type {
   LoginReq, LoginResp, User, CreateBookingReq, CheckInReq, WaterReadingReq,
   PatrolReq, IncidentCreateReq, IncidentActionReq, PoolStatusReq, WorkTaskReq,
-  ComplaintReq, RechargeReq, GuardDutyReq, GuardReliefReq, LockReq,
+  ComplaintReq, RechargeReq, GuardDutyReq, GuardReliefReq, LockReq, StateView,
 } from '../shared/types.js';
 
 const TOKEN_KEY = 'pool-token';
@@ -33,24 +33,8 @@ export async function api<T = any>(path: string, options: RequestInit = {}): Pro
   return data as T;
 }
 
-export interface AppState {
-  users: User[];
-  zones: import('../shared/types.js').Zone[];
-  sessions: import('../shared/types.js').Session[];
-  bookings: import('../shared/types.js').Booking[];
-  waterReadings: import('../shared/types.js').WaterReading[];
-  equipment: import('../shared/types.js').Equipment[];
-  guardDuties: import('../shared/types.js').GuardDuty[];
-  patrolIssues: import('../shared/types.js').PatrolIssue[];
-  incidents: import('../shared/types.js').Incident[];
-  workTasks: import('../shared/types.js').WorkTask[];
-  complaints: import('../shared/types.js').Complaint[];
-  notifications: import('../shared/types.js').Notification[];
-  walletTxns: import('../shared/types.js').WalletTxn[];
-  lessons: import('../shared/types.js').CoachingLesson[];
-  boards: import('../shared/types.js').LiveBoard[];
-  conflicts: { sessionId: string; sessionLabel: string; message: string }[];
-}
+/** /api/state 由服务端按角色裁剪；居民视图不含他人任何 PII */
+export type AppState = StateView;
 
 export function useLogin() {
   return useMutation({
