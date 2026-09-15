@@ -1,0 +1,32 @@
+{
+  "name": "community-pool-ops",
+  "version": "1.0.0",
+  "private": true,
+  "description": "社区泳池预约入场与水质救生巡查协同平台",
+  "type": "module",
+  "scripts": {
+    "dev:server": "tsx watch server/index.ts",
+    "dev:client": "vite",
+    "build:client": "tsc -p tsconfig.client.json && vite build",
+    "build:server": "tsc -p tsconfig.server.json",
+    "build": "npm run build:client && npm run build:server",
+    "start": "node dist-server/index.js",
+    "typecheck": "tsc -p tsconfig.client.json --noEmit && tsc -p tsconfig.server.json --noEmit"
+  },
+  "dependencies": {
+    "@tanstack/react-query": "^5.59.0",
+    "express": "^4.21.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.7.4",
+    "@types/react": "^18.3.11",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.2",
+    "tsx": "^4.19.1",
+    "typescript": "^5.6.2",
+    "vite": "^5.4.8"
+  }
+}

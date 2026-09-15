@@ -1,0 +1,10 @@
+node_modules
+dist
+dist-server
+data
+e2e-check.mjs
+*.log
+.git
+.gitignore
+.env
+.DS_Store

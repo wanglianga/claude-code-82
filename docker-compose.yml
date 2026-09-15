@@ -1,0 +1,23 @@
+services:
+  app:
+    build: .
+    image: community-pool-ops:latest
+    container_name: ${COMPOSE_PROJECT_NAME:-pool}-app
+    environment:
+      NODE_ENV: production
+      PORT: 4000
+      DATA_FILE: /data/pool-db.json
+    ports:
+      - "${CC_PUBLISH_PORT}:4000"
+    volumes:
+      - pool-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:4000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+volumes:
+  pool-data:
