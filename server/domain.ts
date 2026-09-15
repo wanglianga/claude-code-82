@@ -1,7 +1,7 @@
 import type {
   DB, Booking, BookingKind, MemberTier, Incident, IncidentTask, IncidentType,
   Notification, Role, Session, WaterReading, Zone, ZoneId, WorkTask, PatrolIssue,
-  LiveBoard, ZoneLiveStat, GuardPost, PoolStatus,
+  LiveBoard, ZoneLiveStat, GuardPost, PoolStatus, ClosureRecord, ClosureAffectedItem,
 } from '../shared/types.js';
 import { GUARD_POST_LABEL } from '../shared/types.js';
 import { WATER_STD, evaluateWater, priceOf } from '../shared/logic.js';
@@ -450,8 +450,7 @@ export function addPatrolIssue(db: DB, reporter: string, req: {
   });
   return issue;
 }
-
-// ============ 闭池 / 恢复开放（联动编排） ============
+// ============ 闭池 / 恢复开放（不可变档案 + 联动编排，支持同场次多次闭池） ============
 export function changePoolStatus(db: DB, operator: string, req: {
   sessionId: string; status: PoolStatus; reason?: string; cause?: IncidentType | 'other';
   refund?: boolean; compVoucher?: boolean; notifyResidents?: boolean; requireWaterRetest?: boolean;
@@ -459,27 +458,46 @@ export function changePoolStatus(db: DB, operator: string, req: {
   const session = db.sessions.find((s) => s.id === req.sessionId);
   if (!session) throw new HttpError(404, '场次不存在');
   const prev = session.poolStatus;
+  session.closureIds = session.closureIds ?? [];
 
+  // ---------- 恢复开放：只更新当前开放状态，并回写“本轮”闭池档案，历史档案不可变 ----------
   if (req.status === 'normal') {
     if (prev !== 'closed' && prev !== 'restricted') return { session, reopened: false as const };
-    if (session.requireWaterRetest && session.closedAt) {
-      const pass = db.waterReadings.find((w) => w.sessionId === session.id && w.at > session.closedAt! && !w.abnormal);
-      if (!pass) throw new HttpError(409, '闭池原因涉及水质，须先完成一次达标复测（救生员端录入合格水质数据）');
+    const active = session.activeClosureId
+      ? db.closureRecords.find((r) => r.id === session.activeClosureId)
+      : undefined;
+    let retestReading: WaterReading | undefined;
+    if (active?.requireWaterRetest && active.closedAt) {
+      retestReading = db.waterReadings.find(
+        (w) => w.sessionId === session.id && w.at > active.closedAt && !w.abnormal,
+      );
+      if (!retestReading) throw new HttpError(409, '本轮闭池原因涉及水质，须先完成一次达标复测（救生员/维修录入合格水质数据）');
     }
+    const at = now();
     session.poolStatus = 'normal';
     session.statusReason = undefined;
-    session.reopenedAt = now();
+    session.reopenedAt = at;
     session.requireWaterRetest = false;
+    session.activeClosureId = undefined;
+    if (active) {
+      active.status = 'reopened';
+      active.reopenedAt = at;
+      active.reopenedBy = operator;
+      if (retestReading) active.retestReadingId = retestReading.id;
+      active.reopenNote = '复测合格、现场处置完成，恢复开放';
+    }
+    const reason = active?.reason ?? session.statusReason ?? '';
+    const seq = active ? `第${toZh(active.seq)}轮` : '';
     pushNotification(db, {
       title: `恢复开放：${session.label}`, level: 'info', roles: [],
-      body: `水质复测合格、现场处置完成，泳池恢复开放。此前闭池退费与补偿券已发放，居民可重新预约后续场次。`,
+      body: `${seq}闭池（${reason}）已结束：水质复测合格、现场处置完成，泳池恢复开放。本轮退费与补偿券已发放，居民可重新预约后续场次。`,
       sessionId: session.id,
     });
     pushNotification(db, {
       title: `恢复开放提醒：${session.label}`, level: 'info', roles: ['lifeguard', 'frontdesk', 'cleaner'],
       body: '请救生员重新到岗、前台恢复核验、保洁完成开场清洁。', sessionId: session.id,
     });
-    return { session, reopened: true as const };
+    return { session, reopened: true as const, closure: active };
   }
 
   if (req.status === 'restricted') {
@@ -492,93 +510,158 @@ export function changePoolStatus(db: DB, operator: string, req: {
     return { session, reopened: false as const };
   }
 
-  // ---- 闭池：一次性联动退费 / 补偿券 / 复测 / 救生巡查 / 居民通知 ----
-  if (prev === 'closed') throw new HttpError(409, '该场次已处于闭池状态');
-  session.poolStatus = 'closed';
-  session.statusReason = req.reason || '临时闭池';
-  session.closedAt = now();
-  session.settled = true;
-  const waterCause = req.cause === 'water_abnormal' || /水质|余氯|浊度|水温/.test(req.reason || '');
-  session.requireWaterRetest = req.requireWaterRetest ?? waterCause;
+  // ---------- 闭池：生成一份新的不可变档案 ----------
+  if (prev === 'closed') throw new HttpError(409, '该场次已处于闭池状态，请先恢复开放后再发起新一轮闭池');
 
-  const affected = db.bookings.filter(
+  const at = now();
+  const reason = req.reason || '临时闭池';
+  const waterCause = req.cause === 'water_abnormal' || /水质|余氯|浊度|水温/.test(reason);
+  const requireRetest = req.requireWaterRetest ?? waterCause;
+  const seq = (session.closureIds?.length ?? 0) + 1;
+  const closureId = nextId('closure');
+
+  session.poolStatus = 'closed';
+  session.statusReason = reason;
+  session.closedAt = at;
+  session.settled = true;
+  session.requireWaterRetest = requireRetest;
+  session.activeClosureId = closureId;
+  session.reopenedAt = undefined;
+
+  const affectedBookings = db.bookings.filter(
     (b) => b.sessionId === session.id && (b.status === 'booked' || b.status === 'checked_in'),
   );
+
+  const affected: ClosureAffectedItem[] = [];
+  const notificationIds: string[] = [];
   let refundCount = 0;
   let voucherCount = 0;
+  let refundTotal = 0;
 
-  for (const b of affected) {
+  const pushN = (n: Omit<Notification, 'id' | 'at'>) => {
+    db.notifications.unshift({ ...n, id: nextId('nt'), at: now() });
+    if (db.notifications.length > 300) db.notifications.length = 300;
+    notificationIds.push(db.notifications[0].id);
+    return db.notifications[0];
+  };
+
+  for (const b of affectedBookings) {
     const u = db.users.find((x) => x.id === b.userId);
     if (!u) continue;
+    const item: ClosureAffectedItem = {
+      bookingId: b.id, bookingCode: b.code, userId: u.id, userName: u.name,
+      paidAmount: b.paidAmount, paymentMethod: b.paymentMethod, refunded: false, voucherGranted: false,
+    };
     if (req.refund && b.paidAmount > 0) {
       u.walletBalance = (u.walletBalance ?? 0) + b.paidAmount;
       db.walletTxns.unshift({
         id: nextId('tx'), at: now(), userId: u.id, amount: b.paidAmount,
-        reason: `闭池退费 ${b.code}（${session.statusReason}）`, sessionId: session.id,
+        reason: `第${toZh(seq)}轮闭池退费 ${b.code}（${reason}）`,
+        sessionId: session.id, closureId,
       });
       if (b.paymentMethod === 'voucher') u.compVouchers = (u.compVouchers ?? 0) + 1;
       refundCount++;
+      refundTotal += b.paidAmount;
+      item.refunded = true;
     }
     if (req.compVoucher) {
       u.compVouchers = (u.compVouchers ?? 0) + 1;
       voucherCount++;
+      item.voucherGranted = true;
       b.status = 'compensated';
     } else if (req.refund) {
       b.status = 'refunded';
     }
+    b.closureIds = [...(b.closureIds ?? []), closureId];
+
     if (req.notifyResidents) {
-      pushNotification(db, {
-        title: `闭池通知：${session.label} 已${req.refund ? '退费' : '取消'}${req.compVoucher ? '并发放补偿券' : ''}`,
-        body: `原因：${session.statusReason}。${req.refund ? `${b.paidAmount} 元已原路退回您的账户` : ''}${req.compVoucher ? '另发放 1 张补偿券（可抵一次入场）' : ''}。恢复开放时间将另行通知。`,
-        level: 'critical', roles: [], userId: u.id, sessionId: session.id,
+      const n = pushN({
+        title: `闭池通知（第${toZh(seq)}轮）：${session.label} 已${req.refund ? '退费' : '取消'}${req.compVoucher ? '并发放补偿券' : ''}`,
+        body: `闭池原因：${reason}。${req.refund ? `${b.paidAmount} 元已原路退回您的账户` : ''}${req.compVoucher ? '另发放 1 张补偿券（可抵一次入场）' : ''}。恢复开放时间将另行通知。`,
+        level: 'critical', roles: [], userId: u.id, sessionId: session.id, closureId,
       });
+      item.notificationId = n.id;
     }
+    affected.push(item);
   }
 
   if (req.notifyResidents) {
-    pushNotification(db, {
-      title: `【闭池】${session.label}`, level: 'critical', roles: [],
-      body: `${session.statusReason}。已预约居民${req.refund ? '退费' : ''}${req.compVoucher ? '+补偿券' : ''}处理中，开放时间另行通知。`,
-      sessionId: session.id,
+    pushN({
+      title: `【闭池·第${toZh(seq)}轮】${session.label}`, level: 'critical', roles: [],
+      body: `${reason}。已预约居民${req.refund ? '退费' : ''}${req.compVoucher ? '+补偿券' : ''}处理中，开放时间另行通知。`,
+      sessionId: session.id, closureId,
     });
   }
 
-  // 救生巡查同步：在岗救生员结束当前站位（清场）
+  // 救生巡查同步：在岗救生员结束当前站位（清场），记录关联本轮档案
+  let guardReliefCount = 0;
   for (const d of db.guardDuties) {
     if (d.sessionId === session.id && !d.end) {
       d.end = now();
-      d.note = `闭池清场：${session.statusReason}`;
+      d.note = `第${toZh(seq)}轮闭池清场：${reason}`;
+      guardReliefCount++;
     }
   }
-  // 维修：复测/消毒；保洁：清场清洁
-  db.workTasks.unshift({
+
+  // 维修：复测/消毒；保洁：清场清洁（均引用本轮闭池档案）
+  const taskIds: string[] = [];
+  const disinfection: WorkTask = {
     id: nextId('wt'), sessionId: session.id, kind: 'disinfection',
-    title: '闭池后全面消毒与水质复测', detail: `闭池原因：${session.statusReason}。恢复开放前须提交达标水质读数。`,
-    zoneId: 'all', assigneeRole: 'maintenance', status: 'pending', createdAt: now(), source: 'incident',
-  });
-  db.workTasks.unshift({
+    title: `第${toZh(seq)}轮闭池后全面消毒与水质复测`,
+    detail: `闭池原因：${reason}。恢复开放前须提交达标水质读数。`,
+    zoneId: 'all', assigneeRole: 'maintenance', status: 'pending',
+    createdAt: now(), source: 'closure', closureId,
+  };
+  const cleaning: WorkTask = {
     id: nextId('wt'), sessionId: session.id, kind: 'cleaning',
-    title: '闭池清场清洁', detail: '清场后清洁池岸、淋浴区、更衣室，检查遗落物品。',
-    zoneId: 'all', assigneeRole: 'cleaner', status: 'pending', createdAt: now(), source: 'incident',
-  });
+    title: `第${toZh(seq)}轮闭池清场清洁`,
+    detail: '清场后清洁池岸、淋浴区、更衣室，检查遗落物品。',
+    zoneId: 'all', assigneeRole: 'cleaner', status: 'pending',
+    createdAt: now(), source: 'closure', closureId,
+  };
+  db.workTasks.unshift(disinfection, cleaning);
+  taskIds.push(disinfection.id, cleaning.id);
 
   // 关联事件追加联动记录
+  const incidentIds: string[] = [];
   if (req.cause && req.cause !== 'other') {
     const inc = db.incidents.find((i) => i.sessionId === session.id && i.type === req.cause && i.status !== 'resolved');
     if (inc) {
       inc.actions.push({
         id: nextId('ia'), at: now(), by: operator, byRole: 'ops',
-        content: `已执行闭池联动：退费 ${refundCount} 笔、补偿券 ${voucherCount} 张、复测工单与清场清洁已派发、居民通知已发送。`,
+        content: `第${toZh(seq)}轮闭池联动已执行：退费 ${refundCount} 笔、补偿券 ${voucherCount} 张、复测与清场工单已派发、居民通知已发送。`,
       });
+      incidentIds.push(inc.id);
     }
   }
 
-  pushNotification(db, {
-    title: `闭池处置完成：${session.label}`, level: 'critical', roles: STAFF_ROLES,
-    body: `退费 ${refundCount} 笔 / 补偿券 ${voucherCount} 张 / 复测与清场工单已派发 / 救生岗已撤。`, sessionId: session.id,
+  // ---------- 固化不可变闭池档案 ----------
+  const record: ClosureRecord = {
+    id: closureId, seq, sessionId: session.id, sessionLabel: session.label,
+    cause: req.cause ?? 'other', reason, closedAt: at, closedBy: operator,
+    status: 'closed', requireWaterRetest: requireRetest,
+    options: { refund: !!req.refund, compVoucher: !!req.compVoucher, notifyResidents: !!req.notifyResidents },
+    affected, refundTotal, refundCount, voucherCount,
+    announcementIds: notificationIds, guardReliefCount, taskIds, incidentIds,
+  };
+  db.closureRecords.unshift(record);
+  session.closureIds.push(closureId);
+
+  pushN({
+    title: `闭池处置完成（第${toZh(seq)}轮）：${session.label}`, level: 'critical', roles: STAFF_ROLES,
+    body: `退费 ${refundCount} 笔 / 补偿券 ${voucherCount} 张 / 复测与清场工单已派发 / 救生岗已撤。档案号 ${closureId}。`,
+    sessionId: session.id, closureId,
   });
 
-  return { session, refundCount, voucherCount, affected: affected.length, reopened: false as const };
+  return {
+    session, closure: record, refundCount, voucherCount,
+    affected: affected.length, refundTotal, reopened: false as const,
+  };
+}
+
+function toZh(n: number) {
+  const map = ['零', '一', '二', '三', '四', '五', '六', '七', '八', '九', '十'];
+  return n <= 10 ? map[n] : String(n);
 }
 
 // ============ 实时看板 ============
@@ -638,10 +721,15 @@ export function sessionDetail(db: DB, id: string) {
   const hm = new Date().toTimeString().slice(0, 5);
   const stage = session.poolStatus === 'closed' ? 'closed'
     : hm < session.start ? 'booking' : hm > session.end ? 'cleared' : 'live';
+  // 本场历次闭池档案，按发生先后排序（不可变快照）
+  const closureRecords = (session.closureIds ?? [])
+    .map((cid) => db.closureRecords.find((r) => r.id === cid))
+    .filter((r): r is ClosureRecord => !!r);
   return {
     session, stage,
     bookings,
     locks: session.locks,
+    closureRecords,
     waterReadings: db.waterReadings.filter((w) => w.sessionId === id),
     patrolIssues: db.patrolIssues.filter((p) => p.sessionId === id),
     incidents: db.incidents.filter((i) => i.sessionId === id),

@@ -92,8 +92,8 @@ export interface Booking {
   checkedInAt?: string;
   checkedInBy?: string;
   createdAt: string;
-  /** 闭池联动时关联的事件 id */
-  refundEventId?: string;
+  /** 历次闭池档案 id（退费/补偿联动时追加，可多次） */
+  closureIds?: string[];
 }
 
 export type PoolStatus = 'normal' | 'restricted' | 'closed';
@@ -117,6 +117,10 @@ export interface Session {
   maxCapacity: number;
   /** 本场锁定的泳区/泳道（机构包场、教练课等商业占用） */
   locks: ZoneLock[];
+  /** 历次闭池档案（不可变快照，按时间顺序） */
+  closureIds: string[];
+  /** 当前生效中的闭池档案 id；恢复开放后清空（历史仍在 closureIds） */
+  activeClosureId?: string;
   createdAt: string;
 }
 
@@ -279,8 +283,10 @@ export interface WorkTask {
   createdAt: string;
   doneAt?: string;
   result?: string;
-  source?: 'routine' | 'incident' | 'patrol';
+  source?: 'routine' | 'incident' | 'patrol' | 'closure';
   incidentId?: string;
+  /** 闭池联动生成时，引用不可变闭池档案 id */
+  closureId?: string;
 }
 
 export interface Complaint {
@@ -304,6 +310,58 @@ export interface Notification {
   roles: Role[];
   userId?: string;       // 个人通知（退费/补偿）
   sessionId?: string;
+  /** 引用触发该通知的闭池档案（不可变） */
+  closureId?: string;
+}
+
+// ============ 闭池处置档案（不可变快照，同场次可多次闭池） ============
+export interface ClosureAffectedItem {
+  bookingId: string;
+  bookingCode: string;
+  userId: string;
+  userName?: string;
+  paidAmount: number;
+  paymentMethod: Booking['paymentMethod'];
+  refunded: boolean;
+  voucherGranted: boolean;
+  /** 该居民收到的逐人通知 id */
+  notificationId?: string;
+}
+
+export type ClosureStatus = 'closed' | 'reopened';
+
+export interface ClosureRecord {
+  id: string;
+  /** 同一场次第几次闭池，从 1 开始 */
+  seq: number;
+  sessionId: string;
+  sessionLabel: string;
+  cause: IncidentType | 'other';
+  /** 闭池原因原文（雷雨/水质…），固化后不再被后续状态覆盖 */
+  reason: string;
+  closedAt: string;
+  closedBy: string;
+  status: ClosureStatus;
+  requireWaterRetest: boolean;
+  options: { refund: boolean; compVoucher: boolean; notifyResidents: boolean };
+  /** 受影响预约与逐人退费/补偿结果快照 */
+  affected: ClosureAffectedItem[];
+  refundTotal: number;
+  refundCount: number;
+  voucherCount: number;
+  /** 全员公告 + 岗位通知 id */
+  announcementIds: string[];
+  /** 撤哨救生员人数 */
+  guardReliefCount: number;
+  /** 联动生成的消毒复测 / 清场工单 id */
+  taskIds: string[];
+  /** 关联协同事件 id */
+  incidentIds: string[];
+  reopenedAt?: string;
+  reopenedBy?: string;
+  /** 恢复开放所依据的达标复测读数 id */
+  retestReadingId?: string;
+  reopenNote?: string;
 }
 
 /** 钱包流水 */
@@ -314,6 +372,8 @@ export interface WalletTxn {
   amount: number;         // 正=充值/退费，负=消费
   reason: string;
   sessionId?: string;
+  /** 引用产生该退费的闭池档案（第几轮闭池不可变） */
+  closureId?: string;
 }
 
 /** 教练课 */
@@ -372,6 +432,8 @@ export interface DB {
   notifications: Notification[];
   walletTxns: WalletTxn[];
   lessons: CoachingLesson[];
+  /** 全部场次的闭池处置档案（不可变快照） */
+  closureRecords: ClosureRecord[];
   counters: Record<string, number>;
   seededAt: string;
 }
@@ -526,6 +588,8 @@ export interface StateView {
   notifications: Notification[];
   walletTxns: WalletTxn[];
   lessons: CoachingLesson[];
+  /** 闭池处置档案：ops 全量；其他角色为按本人/脱敏裁剪后的快照 */
+  closureRecords: ClosureRecord[];
   boards: LiveBoard[];
   conflicts: { sessionId: string; sessionLabel: string; message: string }[];
 }

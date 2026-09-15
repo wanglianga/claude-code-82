@@ -9,7 +9,14 @@ function load(): DB {
   try {
     if (existsSync(DATA_FILE)) {
       const data = JSON.parse(readFileSync(DATA_FILE, 'utf8')) as DB;
-      if (data && data.users && data.sessions) return data;
+      if (data && data.users && data.sessions) {
+        // 兼容旧版本数据卷：补齐新增的闭池档案集合与场次字段
+        if (!Array.isArray(data.closureRecords)) data.closureRecords = [];
+        for (const s of data.sessions) {
+          if (!Array.isArray(s.closureIds)) s.closureIds = [];
+        }
+        return data;
+      }
     }
   } catch (e) {
     console.error('[store] 数据文件读取失败，重新播种:', (e as Error).message);

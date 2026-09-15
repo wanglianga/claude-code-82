@@ -49,23 +49,23 @@ export function seed(): DB {
   const sessions: Session[] = [
     {
       id: 's-am', label: '早场·老人晨泳（公益）', date, start: hhmm(-200), end: hhmm(-80),
-      poolStatus: 'normal', maxCapacity: 110, publicWelfare: true, locks: [], createdAt: rel(-230),
+      poolStatus: 'normal', maxCapacity: 110, publicWelfare: true, locks: [], closureIds: [], createdAt: rel(-230),
     },
     {
       id: 's-mid', label: '当前场次·上午公众场', date, start: hhmm(-55), end: hhmm(65),
       poolStatus: 'normal', maxCapacity: 154, locks: [
         { id: 'lock-1', zoneId: 'training', lane: 1, reason: 'coaching', title: '蓝鲸培训·自由泳提高班', contactName: '赵晓', contactPhone: '13800000005', capacity: 8, isCommercial: false },
-      ], createdAt: rel(-120),
+      ], closureIds: [], createdAt: rel(-120),
     },
     {
       id: 's-pm', label: '下午公众场', date, start: hhmm(150), end: hhmm(270),
       poolStatus: 'normal', maxCapacity: 154, locks: [
         { id: 'lock-2', zoneId: 'family', reason: 'institution_rental', title: '蓝鲸游泳培训机构·少儿包场（洽谈中）', contactName: '赵晓', contactPhone: '13800000005', capacity: 30, isCommercial: true },
-      ], createdAt: rel(-60),
+      ], closureIds: [], createdAt: rel(-60),
     },
     {
       id: 's-eve', label: '晚场·暑期儿童高峰', date, start: hhmm(360), end: hhmm(480),
-      poolStatus: 'normal', maxCapacity: 154, locks: [], createdAt: rel(-30),
+      poolStatus: 'normal', maxCapacity: 154, locks: [], closureIds: [], createdAt: rel(-30),
     },
   ];
 
@@ -166,6 +166,6 @@ export function seed(): DB {
   return {
     users, zones, sessions, bookings, waterReadings, equipment, guardDuties,
     patrolIssues: [...patrolIssues], incidents: [], workTasks, complaints, notifications, walletTxns,
-    lessons, counters: { seq }, seededAt: new Date().toISOString(),
+    lessons, closureRecords: [], counters: { seq }, seededAt: new Date().toISOString(),
   };
 }

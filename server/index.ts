@@ -76,7 +76,7 @@ app.get('/api/state', auth, (req, res) => {
 // ============ 场次 ============
 app.get('/api/sessions/:id', auth, (req, res) => {
   const user = (req as any).user as User;
-  res.json(sanitizeSessionDetail(sessionDetail(getDB(), req.params.id), user));
+  res.json(sanitizeSessionDetail(sessionDetail(getDB(), req.params.id), user, getDB()));
 });
 
 // ============ 预约 ============

@@ -79,6 +79,24 @@ function safeBoard(b: LiveBoard, viewer: User): LiveBoard {
   };
 }
 
+/** 闭池档案裁剪：运营全量；居民仅见本人受影响条目；其他员工（含前台）只见原因/状态/计数，不见逐人退款 */
+function sanitizeClosure(db: DB, r: DB['closureRecords'][number], viewer: User) {
+  const role = viewer.role;
+  if (role === 'ops') return r;
+  if (role === 'resident') {
+    const mine = r.affected.filter((a) => a.userId === viewer.id);
+    if (mine.length === 0) return null;
+    return { ...r, affected: mine.map((a) => ({ ...a, userName: viewer.name })) };
+  }
+  // 救生/保洁/维修/前台：知道每轮闭池原因、复测与恢复状态、本岗相关工单数即可
+  const myTaskIds = r.taskIds.filter((tid) => db.workTasks.find((t) => t.id === tid)?.assigneeRole === role);
+  return {
+    ...r, affected: [], announcementIds: [],
+    refundTotal: r.refundCount, // 不含逐人金额，保留笔数
+    taskIds: myTaskIds,
+  };
+}
+
 export function buildStateView(db: DB, viewer: User): StateView {
   const role = viewer.role;
   const isOps = role === 'ops';
@@ -150,18 +168,25 @@ export function buildStateView(db: DB, viewer: User): StateView {
 
   const sessions = db.sessions.map((s) => safeSession(s, viewer));
   const boards = db.sessions.map((s) => safeBoard(liveBoard(db, s.id), viewer));
-  const conflicts = isOps ? conflictSummary(db) : [];
+  const conflicts = isOps || isFrontdesk ? conflictSummary(db) : [];
+
+  // ---- 闭池档案：不可变快照，按角色裁剪（居民仅本人条目；救生/保洁/维修不见逐人金额） ----
+  const closureRecords = db.closureRecords
+    .flatMap((r) => {
+      const v = sanitizeClosure(db, r, viewer);
+      return v ? [v] : [];
+    });
 
   return {
     viewerRole: role,
     users, zones: db.zones, sessions, bookings, waterReadings, equipment,
     guardDuties, patrolIssues, incidents, workTasks, complaints, notifications,
-    walletTxns, lessons, boards, conflicts,
+    walletTxns, lessons, closureRecords, boards, conflicts,
   };
 }
 
 /** GET /api/sessions/:id 同样按角色裁剪（前端虽走 /state，接口本身也不得泄露） */
-export function sanitizeSessionDetail(detail: ReturnType<typeof sessionDetail>, viewer: User) {
+export function sanitizeSessionDetail(detail: ReturnType<typeof sessionDetail>, viewer: User, db: DB) {
   const role = viewer.role;
   const isOps = role === 'ops';
   const isFrontdesk = role === 'frontdesk';
@@ -169,10 +194,13 @@ export function sanitizeSessionDetail(detail: ReturnType<typeof sessionDetail>, 
     isOps || isFrontdesk ? detail.bookings
     : role === 'resident' ? detail.bookings.filter((b) => b.userId === viewer.id)
     : [];
+  const closureRecords = (detail.closureRecords ?? [])
+    .flatMap((r) => { const v = sanitizeClosure(db, r, viewer); return v ? [v] : []; });
   return {
     ...detail,
     session: safeSession(detail.session, viewer),
     bookings,
+    closureRecords,
     locks: role === 'ops' || isFrontdesk ? detail.locks : detail.locks.map(safeLock),
     waterReadings: isOps || role === 'lifeguard' || role === 'maintenance' ? detail.waterReadings : [],
     patrolIssues:

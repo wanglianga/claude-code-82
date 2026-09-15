@@ -74,7 +74,7 @@ npm run build          # 类型检查 + 前后端产物
 ## 验证方式（宿主 docker compose up）
 
 1. `docker compose up -d --build` 后 `docker compose ps` 为 `(healthy)`，`/api/health` 返回 healthy，首页与静态资源 HTTP 200。
-2. 仓库附 `e2e-check.mjs` 与 `privacy-check.mjs`（不打进镜像），在宿主/容器网络可访问处执行（默认打 `http://host.docker.internal:3082/api`，可用 `TARGET=` 覆盖；每个脚本需在全新播种数据上单独运行：`docker compose down -v && docker compose up -d` 后等待 healthy）：
+2. 仓库附 `e2e-check.mjs`、`privacy-check.mjs`、`multi-closure-check.mjs`（不打进镜像），在宿主/容器网络可访问处执行（默认打 `http://host.docker.internal:3082/api`，可用 `TARGET=` 覆盖；每个脚本需在全新播种数据上单独运行：`docker compose down -v && docker compose up -d` 后等待 healthy）：
    - `node e2e-check.mjs`：**39 项业务断言**，覆盖
    - 六角色登录；亲子预约扣款；未签健康承诺/无深水证被拒；
    - 前台核验放行、储物柜重复分配与非绿码拒绝；
@@ -84,7 +84,8 @@ npm run build          # 类型检查 + 前后端产物
    - 闭池联动：原路退费到钱包、按笔发补偿券、预约状态变更、逐人居民通知、救生撤哨、复测/清场工单；
    - **恢复开放门禁**：无闭池后达标复测拒绝开池 → 维修复测达标 → 恢复 → 居民端同步看到通告；
    - 公益场商业包场冲突、超容量包场冲突、团体超额自动立案「预约超额」。
-3. 手工体验建议路径：`li` 预约当前场次亲子时段 → `frontdesk` 核验放行（自动分配储物柜）→ `lifeguard` 用「异常样例」录入水质 → 各角色铃铛收到紧急通告并在「事件协同」完成本岗任务 → `maintenance` 完成消毒工单并复测 → `ops` 在「闭池与恢复」一键闭池（默认雷雨原因、退费+补偿+通知全勾选）→ 切到 `li` 看到余额与补偿券到账 → `maintenance` 复测达标 → `ops` 恢复开放。
+   - `node multi-closure-check.mjs`：**36 项多轮闭池断言**，覆盖不可变闭池档案（见下节）。
+3. 手工体验建议路径：`li` 预约当前场次亲子时段 → `frontdesk` 核验放行（自动分配储物柜）→ `lifeguard` 用「异常样例」录入水质 → 各角色铃铛收到紧急通告并在「事件协同」完成本岗任务 → `maintenance` 完成消毒工单并复测 → `ops` 在「闭池与恢复」一键闭池（默认雷雨原因、退费+补偿+通知全勾选）→ 切到 `li` 看到余额与补偿券到账 → `maintenance` 复测达标 → `ops` 恢复开放；恢复后可再次闭池（如水质异常），在「闭池与恢复」底部查看多轮档案。
 
 ---
 
@@ -102,6 +103,18 @@ npm run build          # 类型检查 + 前后端产物
 | 运营 | 全量业务视图（退费处置、投诉答复、冲突协调所必需），人员卡片同样不含密码 |
 
 闭池联动后，受影响居民各自只能在自己的快照里看到**自己那笔**退费流水、补偿状态与逐人通知；`privacy-check.mjs` 对上述边界做了 **43 项断言**（含快照 JSON 中不得出现他人手机号/姓名/预约码/陪同人等字符串级检查）。
+
+## 闭池处置档案（不可变快照，支持同场次多次闭池）
+
+每次执行闭池都会生成一条独立的 `ClosureRecord`（`server/domain.ts`），**一经固化不再被当前场次状态覆盖**：
+
+- 档案逐字保存：闭池序号（第 N 轮）、原因分类与原文（雷雨/水质…）、闭池时间与操作人、是否要求复测、逐笔受影响预约的退费/补偿券/通知送达结果、退费总额、撤哨人数、消毒复测与清场工单、关联事件；
+- 退费钱包流水、补偿预约、逐人通知与工单均带 `closureId`，反向引用同一档案；居民通知标题带「第 N 轮」；
+- **恢复开放只更新当前开放状态**（`poolStatus`、清空 `activeClosureId`），并仅回写本轮档案的 `reopenedAt/reopenedBy/retestReadingId`；历史档案的原因与处置结果保持不变；
+- 场次恢复后允许再次闭池：场次 `closureIds` 累积全部档案，运营时间线与「闭池与恢复」底部按轮次展示，雷雨档案与水质档案互不覆盖；
+- 恢复门禁按**当前生效档案**校验（水质原因闭池必须有晚于该轮闭池时间的达标复测）；
+- 角色视图同步裁剪：运营看全量档案与逐人明细，居民只看到含本人的条目，救生/保洁/维修只见原因、状态与本岗工单，不见逐人退款金额。
+
 
 ## 需求覆盖对照
 
@@ -123,12 +136,14 @@ npm run build          # 类型检查 + 前后端产物
 
 ```
 shared/            前后端共享：领域模型 types.ts、水质标准/计价 logic.ts
-server/            Express API：store（原子 JSON）、seed（演示数据）、domain（业务编排）、index（路由/RBAC）
+server/            Express API：store（原子 JSON）、seed（演示数据）、domain（业务编排/闭池档案）、views（角色化脱敏视图）、index（路由/RBAC）
 src/               React：api(TanStack Query)、ui 组件、六角色 pages、components（事件/通告/通用）
 Dockerfile         三阶段（deps→build→runner），非 root 用户 app，HEALTHCHECK
 docker-compose.yml 单 app 服务 + 命名卷，仅发布 CC_PUBLISH_PORT
 .env.example       端口/项目名等环境变量示例
-e2e-check.mjs      39 项端到端断言脚本（不打进镜像）
+e2e-check.mjs              39 项端到端业务断言（不打进镜像）
+privacy-check.mjs          43 项跨角色数据泄露断言
+multi-closure-check.mjs    36 项多轮闭池档案不可变断言
 ```
 
 ## 主要 HTTP 接口（均在 `/api` 下，Bearer Token）

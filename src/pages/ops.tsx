@@ -50,9 +50,29 @@ function buildTimeline(state: AppState, sessionId: string): TL[] {
   }
   for (const t of state.workTasks.filter((t) => t.sessionId === sessionId && t.doneAt))
     tl.push({ at: t.doneAt!, title: `工单完成：${t.title} — ${t.result}`, tone: 'ok', who: t.assigneeName ?? '' });
-  if (s.closedAt) tl.push({ at: s.closedAt, title: `闭池：${s.statusReason}（退费/补偿/复测/清场/通知联动执行）`, tone: 'danger', who: '运营指挥' });
-  if (s.reopenedAt) tl.push({ at: s.reopenedAt, title: '复测合格，恢复开放', tone: 'ok', who: '运营指挥' });
+  // 每一轮闭池都来自不可变档案：原因、退费补偿、清场、复测、通知结果各自固化，互不覆盖
+  const closureRecords = state.closureRecords
+    .filter((r) => r.sessionId === sessionId)
+    .sort((a, b) => a.seq - b.seq);
+  for (const r of closureRecords) {
+    tl.push({
+      at: r.closedAt,
+      title: `第${zh(r.seq)}轮闭池：${r.reason}（退费 ${r.refundCount} 笔/¥${r.refundTotal}、补偿券 ${r.voucherCount} 张、撤哨 ${r.guardReliefCount} 人、通知 ${r.announcementIds.length} 条、处置档案 ${r.id}）`,
+      tone: 'danger', who: `${r.closedBy}·闭池档案`,
+    });
+    if (r.status === 'reopened' && r.reopenedAt) {
+      tl.push({
+        at: r.reopenedAt,
+        title: `第${zh(r.seq)}轮闭池结束，恢复开放${r.retestReadingId ? '（依据达标复测 ' + r.retestReadingId + '）' : ''}`,
+        tone: 'ok', who: `${r.reopenedBy ?? '运营'}·闭池档案`,
+      });
+    }
+  }
   return tl.sort((a, b) => b.at.localeCompare(a.at));
+}
+
+function zh(n: number) {
+  return ['零', '一', '二', '三', '四', '五', '六', '七', '八', '九', '十'][n] ?? String(n);
 }
 
 function Command({ state }: Props) {
@@ -355,7 +375,51 @@ function CloseReopen({ state, user }: Props) {
           ))}
         </Card>
       </div>
+
+      <ClosureArchives state={state} sessionId={sessionId} />
     </div>
+  );
+}
+
+/** 历次闭池处置档案：不可变快照，多轮闭池独立呈现 */
+function ClosureArchives({ state, sessionId }: { state: AppState; sessionId: string }) {
+  const records = state.closureRecords
+    .filter((r) => r.sessionId === sessionId)
+    .sort((a, b) => b.seq - a.seq);
+  if (records.length === 0) return null;
+  return (
+    <Card className="section-gap" title={`闭池处置档案（本场共 ${records.length} 轮，归档后不可被当前状态覆盖）`}>
+      <div className="grid cols-2">
+        {records.map((r) => (
+          <div key={r.id} className={`notif ${r.status === 'closed' ? 'critical' : 'info'}`}>
+            <div className="flex">
+              <b>第{zh(r.seq)}轮闭池 · {r.cause === 'other' ? '其他原因' : INCIDENT_TYPE_LABEL[r.cause]}</b>
+              <span className="spacer" />
+              <Badge tone={r.status === 'closed' ? 'danger' : 'ok'}>{r.status === 'closed' ? '闭池中' : '已恢复'}</Badge>
+            </div>
+            <div className="small" style={{ marginTop: 4 }}>原因：{r.reason}</div>
+            <dl className="kv small" style={{ marginTop: 6 }}>
+              <dt>闭池时间</dt><dd>{fmtDateTime(r.closedAt)} · {r.closedBy}</dd>
+              <dt>退费补偿</dt><dd>{r.refundCount} 笔 / ¥{r.refundTotal} · 补偿券 {r.voucherCount} 张</dd>
+              <dt>清场</dt><dd>撤哨 {r.guardReliefCount} 人 · 联动工单 {r.taskIds.length} 个</dd>
+              <dt>通知</dt><dd>{r.announcementIds.length} 条（全员公告+逐人通知）</dd>
+              <dt>恢复</dt><dd>{r.status === 'reopened' ? `${fmtDateTime(r.reopenedAt)} · ${r.reopenedBy ?? ''}${r.retestReadingId ? ' · 复测 ' + r.retestReadingId + ' 达标' : ''}` : '等待复测与恢复'}</dd>
+            </dl>
+            <details style={{ marginTop: 6 }}>
+              <summary className="small muted" style={{ cursor: 'pointer' }}>逐人处置结果（{r.affected.length}）</summary>
+              <div className="table-wrap" style={{ marginTop: 6 }}><table>
+                <thead><tr><th>预约码</th><th>泳客</th><th>退费</th><th>补偿券</th><th>通知</th></tr></thead>
+                <tbody>{r.affected.map((a) => (
+                  <tr key={a.bookingId}><td className="code-mono small">{a.bookingCode}</td><td className="small">{a.userName}</td>
+                    <td>{a.refunded ? `¥${a.paidAmount}` : '—'}</td><td>{a.voucherGranted ? '1 张' : '—'}</td>
+                    <td>{a.notificationId ? '已送达' : '—'}</td></tr>
+                ))}</tbody></table></div>
+            </details>
+            <div className="small muted" style={{ marginTop: 4 }}>档案号 {r.id}</div>
+          </div>
+        ))}
+      </div>
+    </Card>
   );
 }
 
@@ -364,7 +428,7 @@ function bookingsDone(state: AppState, sessionId: string) {
   return list.length ? `已处理 ${list.length} 笔（退费/补偿到账）` : '进行中';
 }
 function tasksDone(state: AppState, sessionId: string) {
-  const need = state.workTasks.filter((t) => t.sessionId === sessionId && t.source === 'incident' && t.title.includes('闭池'));
+  const need = state.workTasks.filter((t) => t.sessionId === sessionId && t.source === 'closure');
   return need.length > 0 && need.every((t) => t.status === 'done');
 }
 

@@ -3,6 +3,8 @@ dist
 dist-server
 data
 e2e-check.mjs
+privacy-check.mjs
+multi-closure-check.mjs
 *.log
 .git
 .gitignore
