@@ -57,6 +57,7 @@ function Login() {
             <li>健康承诺 · 健康码 · 儿童陪同人 · 储物柜 · 深水权限</li>
             <li>水温 / 余氯 / 浊度 / pH 自动判异，异常即限流立案</li>
             <li>雷雨、抽筋、走失、超额等事件五角色同屏协同</li>
+            <li>抽筋救援记录：泳道临停、换岗/恢复三确认、站位调整带入下一场、复盘进培训排班</li>
             <li>闭池一键联动退费、补偿券、复测、清场与居民通知</li>
           </ul>
         </div>
@@ -103,6 +104,7 @@ const NAV: Record<Role, { key: string; label: string; icon: string }[]> = {
   ],
   lifeguard: [
     { key: 'board', label: '实时看板', icon: '🌊' },
+    { key: 'rescue', label: '抽筋救援', icon: '🆘' },
     { key: 'water', label: '水质检测', icon: '🧪' },
     { key: 'patrol', label: '救生巡查', icon: '🔭' },
     { key: 'guard', label: '站位与换岗', icon: '🛟' },
@@ -120,6 +122,7 @@ const NAV: Record<Role, { key: string; label: string; icon: string }[]> = {
   ],
   ops: [
     { key: 'command', label: '场次指挥台', icon: '🎛️' },
+    { key: 'rescue', label: '救援复盘培训', icon: '🆘' },
     { key: 'conflict', label: '商业/公益冲突', icon: '⚖️' },
     { key: 'close', label: '闭池与恢复', icon: '🌧️' },
     { key: 'incident', label: '事件指挥', icon: '🚨' },
@@ -141,6 +144,15 @@ function Shell({ user, state }: { user: User; state: AppState }) {
     }
   };
   const critical = state.notifications.filter((n) => n.level === 'critical' && (n.roles.length === 0 || n.roles.includes(user.role) || n.userId === user.id)).length;
+  // 抽筋救援待办：救生员=临停中/收尾未完成/有未确认关注泳道；运营=三确认完成待复盘
+  const rescueTodo = user.role === 'lifeguard'
+    ? state.boards.reduce((n, b) => n + b.suspendedLanes.length + b.focusLanes.filter((f) => !f.ackAt).length, 0)
+      + state.crampRescues.filter((r) => !r.laneSuspended && !r.reviewedAt
+        && (['guard_relief', 'lane_reopen', 'order_restored'] as const).some((k) => !r.closure[k].done)).length
+    : user.role === 'ops'
+      ? state.crampRescues.filter((r) => !r.reviewedAt
+        && (['guard_relief', 'lane_reopen', 'order_restored'] as const).every((k) => r.closure[k].done)).length
+      : 0;
   return (
     <div className="app">
       <aside className="sidebar">
@@ -152,6 +164,9 @@ function Shell({ user, state }: { user: User; state: AppState }) {
               <span className="badge danger" style={{ marginLeft: 'auto' }}>
                 {state.incidents.filter((i) => i.status !== 'resolved' && (i.tasks.some((t) => t.role === user.role && !t.done) || user.role === 'ops')).length}
               </span>
+            )}
+            {n.key === 'rescue' && rescueTodo > 0 && (
+              <span className="badge danger" style={{ marginLeft: 'auto' }}>{rescueTodo}</span>
             )}
           </button>
         ))}

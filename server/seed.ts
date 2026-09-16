@@ -1,6 +1,7 @@
 import type {
   DB, User, Zone, Session, Booking, WaterReading, Equipment, GuardDuty,
   PatrolIssue, WorkTask, Complaint, Notification, WalletTxn, CoachingLesson,
+  CrampRescue, GuardTrainingItem,
 } from '../shared/types.js';
 
 // 以“当前时刻”为锚生成演示数据：上午公众场正在进行、在池有人、水质读数与上哨时间都在过去，
@@ -55,13 +56,22 @@ export function seed(): DB {
       id: 's-mid', label: '当前场次·上午公众场', date, start: hhmm(-55), end: hhmm(65),
       poolStatus: 'normal', maxCapacity: 154, locks: [
         { id: 'lock-1', zoneId: 'training', lane: 1, reason: 'coaching', title: '蓝鲸培训·自由泳提高班', contactName: '赵晓', contactPhone: '13800000005', capacity: 8, isCommercial: false },
-      ], closureIds: [], createdAt: rel(-120),
+      ],
+      // 早场老人晨泳 2 号道抽筋救援复盘后，站位调整带入本场：救生巡查重点关注同一泳道
+      guardFocusLanes: [
+        { zoneId: 'shallow', lane: 2, reason: '上场（早场·老人晨泳）该泳道发生抽筋救援 CR-2059，复盘要求加强浅水岗瞭望与老人泳道提醒', rescueId: 'cr-seed-1', fromSessionId: 's-am', at: rel(-85) },
+      ],
+      closureIds: [], createdAt: rel(-120),
     },
     {
       id: 's-pm', label: '下午公众场', date, start: hhmm(150), end: hhmm(270),
       poolStatus: 'normal', maxCapacity: 154, locks: [
         { id: 'lock-2', zoneId: 'family', reason: 'institution_rental', title: '蓝鲸游泳培训机构·少儿包场（洽谈中）', contactName: '赵晓', contactPhone: '13800000005', capacity: 30, isCommercial: true },
-      ], closureIds: [], createdAt: rel(-60),
+      ],
+      guardFocusLanes: [
+        { zoneId: 'shallow', lane: 2, reason: '早场老人晨泳 2 号道抽筋救援 CR-2059 站位调整：持续重点关注', rescueId: 'cr-seed-1', fromSessionId: 's-am', at: rel(-85) },
+      ],
+      closureIds: [], createdAt: rel(-60),
     },
     {
       id: 's-eve', label: '晚场·暑期儿童高峰', date, start: hhmm(360), end: hhmm(480),
@@ -126,6 +136,9 @@ export function seed(): DB {
   ];
 
   const guardDuties: GuardDuty[] = [
+    // 早场老人晨泳抽筋救援：刘救生在浅水岗施救后换岗给周救生（与 cr-seed-1 关联）
+    { id: nid('gd'), sessionId: 's-am', guardUserId: 'u-lg1', post: 'tower_shallow', start: rel(-200), end: rel(-160), relief: '周救生', note: '抽筋救援 CR-2059 后换岗：陪同抽筋泳客岸边观察', crampRescueId: 'cr-seed-1' },
+    { id: nid('gd'), sessionId: 's-am', guardUserId: 'u-lg2', post: 'tower_shallow', start: rel(-160), end: rel(-80), note: '接替抽筋救援站位，重点关注 2 号道', crampRescueId: 'cr-seed-1' },
     { id: nid('gd'), sessionId: 's-mid', guardUserId: 'u-lg1', post: 'tower_deep', start: rel(-50) },
     { id: nid('gd'), sessionId: 's-mid', guardUserId: 'u-lg2', post: 'family_patrol', start: rel(-50) },
   ];
@@ -149,6 +162,7 @@ export function seed(): DB {
 
   const notifications: Notification[] = [
     { id: nid('nt'), at: rel(-50), title: '今日开场正常', body: '各泳区水质达标，当前场次准时开放。老人晨泳公益场免费。', level: 'info', roles: [], sessionId: 's-mid' },
+    { id: nid('nt'), at: rel(-84), title: '🛟 本场救生巡查重点关注：浅水休闲区 2 号道', body: '早场老人晨泳该泳道发生抽筋救援 CR-2059（已复盘），站位调整要求浅水岗加强瞭望、开场广播热身提醒。请当班救生员在实时看板确认。', level: 'warning', roles: ['lifeguard', 'ops'], sessionId: 's-mid' },
     { id: nid('nt'), at: rel(-30), title: '商业包场冲突待协调', body: '蓝鲸培训申请在下午公众场整租亲子儿童区（30 人），与居民亲子公益预约（B-2066）存在冲突，请运营在同场次页面协调。', level: 'warning', roles: ['ops', 'frontdesk'], sessionId: 's-pm' },
   ];
 
@@ -163,9 +177,48 @@ export function seed(): DB {
     { id: 'ls-2', coachName: '林教练', title: '少儿启蒙班', sessionId: 's-eve', zoneId: 'family', lane: 0, capacity: 6, enrolled: 6, price: 150, studentIds: ['u-li'] },
   ];
 
+  // ---- 早场老人晨泳抽筋救援（已完成三项收尾确认、已复盘、站位调整带入当前场） ----
+  const crSeed: CrampRescue = {
+    id: 'cr-seed-1', code: 'CR-2059', sessionId: 's-am', zoneId: 'shallow', lane: 2,
+    foundAt: rel(-170), guardName: '刘救生', crampPart: 'calf',
+    patronDesc: '老人晨泳男泳客（约 65 岁，柜 B03），自称下水前未充分热身',
+    method: 'wading', shoreTreatment: '搀扶上岸后坐姿伸展小腿、热敷保暖、补充温水，岸边观察 20 分钟无异常',
+    familyContacted: true, familyNote: '已由前台电话告知其子，家属知晓并到馆接送',
+    medicalAdvised: false, medicalNote: '生命体征平稳，本人与家属均拒绝送医，签署知情登记',
+    closure: {
+      guard_relief: { done: true, at: rel(-160), by: '刘救生', note: '周救生接替浅水岗，刘救生陪同泳客岸边观察' },
+      lane_reopen: { done: true, at: rel(-145), by: '刘救生', note: '2 号道围观泳客疏散后重新开放' },
+      order_restored: { done: true, at: rel(-140), by: '周救生', note: '浅水各道游进秩序恢复' },
+    },
+    adjustments: [
+      { at: rel(-150), by: '刘救生', content: '老人晨泳场浅水岗增加一名机动巡视，2 号道两端各安排瞭望提醒，下水前广播热身提示' },
+    ],
+    laneSuspended: false, laneSuspendReason: '抽筋救援处置，泳道临时关闭',
+    reviewedAt: rel(-90), reviewedBy: '孙运营',
+    reviewSummary: '发现及时、施救规范；暴露问题为晨泳老人热身不足、浅水岗单人瞭望有盲区。已调整为双人浅水岗并加强热身广播。',
+    trainingIds: ['gt-seed-1'], intoSchedule: true, createdAt: rel(-170),
+  };
+
+  const crampRescues: CrampRescue[] = [crSeed];
+
+  const guardTraining: GuardTrainingItem[] = [
+    {
+      id: 'gt-seed-1', source: 'cramp_rescue', sourceRescueId: 'cr-seed-1',
+      sessionId: 's-am', sessionLabel: '早场·老人晨泳（公益）', at: rel(-90),
+      title: '抽筋救援复盘培训：浅水休闲区 2 号道（CR-2059）',
+      content: '老年泳客小腿抽筋的识别与岸上伸援/下水搀扶要点；晨泳场开场 10 分钟热身广播；浅水岗双人交叉瞭望，重点关注 1-2 号道老人泳客。',
+      targetGuardNames: ['刘救生', '周救生'], intoSchedule: true,
+      scheduleNote: '本周晨泳场浅水岗双人值守，由刘救生带教一次',
+      recordedBy: '孙运营', done: false,
+    },
+  ];
+
+  sessions[0].crampRescueCount = 1;
+
   return {
     users, zones, sessions, bookings, waterReadings, equipment, guardDuties,
     patrolIssues: [...patrolIssues], incidents: [], workTasks, complaints, notifications, walletTxns,
-    lessons, closureRecords: [], counters: { seq }, seededAt: new Date().toISOString(),
+    lessons, closureRecords: [], crampRescues, guardTraining,
+    counters: { seq }, seededAt: new Date().toISOString(),
   };
 }

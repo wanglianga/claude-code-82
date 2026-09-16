@@ -45,9 +45,23 @@ function residentLock(l: ZoneLock): ZoneLock {
 }
 
 function safeSession(s: Session, viewer: User): Session {
-  if (viewer.role === 'ops' || viewer.role === 'frontdesk') return s;
-  if (viewer.role === 'resident') return { ...s, locks: s.locks.map(residentLock) };
-  return { ...s, locks: s.locks.map(safeLock) };
+  if (viewer.role === 'ops') return s;
+  if (viewer.role === 'frontdesk') {
+    // 前台需协调机构包场入场（可见锁区联系人），但不见救生内部重点关注泳道
+    return { ...s, guardFocusLanes: [] };
+  }
+  if (viewer.role === 'lifeguard') return { ...s, locks: s.locks.map(safeLock) };
+  if (viewer.role === 'resident') {
+    return {
+      ...s,
+      locks: s.locks.map(residentLock),
+      // 居民不见既往救援细节：临停只告知“现场处置临时关闭”，不带抽筋/救援原因
+      suspendedLanes: (s.suspendedLanes ?? []).map((l) => ({ ...l, reason: '现场处置，泳道临时关闭' })),
+      guardFocusLanes: [],
+    };
+  }
+  // 保洁/维修：可见临停状态（用于引导/疏散），但不见救生内部重点关注泳道
+  return { ...s, locks: s.locks.map(safeLock), guardFocusLanes: [] };
 }
 
 function safeLesson(l: CoachingLesson, viewer: User): CoachingLesson {
@@ -63,6 +77,8 @@ function safeBoard(b: LiveBoard, viewer: User): LiveBoard {
     // 居民看板：仅泳区聚合与场次状态；水质/事件/排班/设备均属现场运营数据，不进居民快照
     return {
       ...b, session, water: null, openIncidents: [], guardOnDuty: [], equipment: [],
+      focusLanes: [],
+      suspendedLanes: b.suspendedLanes.map((l) => ({ ...l, reason: '现场处置，泳道临时关闭' })),
     };
   }
   if (role === 'ops' || role === 'lifeguard') {
@@ -70,15 +86,16 @@ function safeBoard(b: LiveBoard, viewer: User): LiveBoard {
     return { ...b, session };
   }
   if (role === 'frontdesk') {
-    // 前台只需泳区聚合与未结事件，不看设备清单/救生排班明细
-    return { ...b, session, guardOnDuty: [], equipment: [] };
+    // 前台只需泳区聚合与未结事件，不看设备清单/救生排班明细/救生内部关注泳道
+    return { ...b, session, guardOnDuty: [], equipment: [], focusLanes: [] };
   }
-  // 保洁/维修：只看需要本岗参与的事件；设备清单仅维修需要
+  // 保洁/维修：只看需要本岗参与的事件；设备清单仅维修需要；不见救生内部关注泳道
   return {
     ...b,
     session,
     openIncidents: b.openIncidents.filter((i) => i.tasks.some((t) => t.role === role)),
     equipment: role === 'maintenance' ? b.equipment : [],
+    focusLanes: [],
   };
 }
 
@@ -180,11 +197,28 @@ export function buildStateView(db: DB, viewer: User): StateView {
       return v ? [v] : [];
     });
 
+  // ---- 抽筋救援记录：救生/运营/前台（现场协同）全量；保洁/维修仅见与本岗事件关联的救援；居民不可见 ----
+  let crampRescues: DB['crampRescues'] = [];
+  if (isOps || isLifeguard || isFrontdesk) crampRescues = db.crampRescues;
+  else if (isCleaner || role === 'maintenance') {
+    crampRescues = db.crampRescues.filter((r) => {
+      const inc = r.incidentId ? db.incidents.find((i) => i.id === r.incidentId) : undefined;
+      return inc?.tasks.some((t) => t.role === role);
+    });
+  }
+
+  // ---- 救生培训项：运营全量；救生员见本人参训或全体项；其他岗位不可见 ----
+  const guardTraining = isOps
+    ? db.guardTraining
+    : isLifeguard
+      ? db.guardTraining.filter((t) => t.targetGuardNames.length === 0 || t.targetGuardNames.includes(viewer.name))
+      : [];
+
   return {
     viewerRole: role,
     users, zones: db.zones, sessions, bookings, waterReadings, equipment,
     guardDuties, patrolIssues, incidents, workTasks, complaints, notifications,
-    walletTxns, lessons, closureRecords, boards, conflicts,
+    walletTxns, lessons, closureRecords, crampRescues, guardTraining, boards, conflicts,
   };
 }
 

@@ -9,6 +9,7 @@ import {
 } from '../ui.js';
 import { SessionPicker, PoolStatusBanner } from '../components/common.js';
 import { IncidentList, IncidentCreateForm } from '../components/incident.js';
+import { RescueWorkbench, FocusLaneAlerts, zoneLabel } from '../components/cramp.js';
 import { WATER_STD } from '../../shared/logic.js';
 
 type Props = { user: User; state: AppState; tab: string; sessionId?: string };
@@ -24,6 +25,13 @@ function Board({ state, sessionId, setSessionId }: { state: AppState; sessionId:
     <div>
       <SessionPicker sessions={state.sessions} value={sessionId} onChange={setSessionId} />
       <PoolStatusBanner status={s.poolStatus} reason={s.statusReason} requireRetest={s.requireWaterRetest} closedAt={s.closedAt} reopenedAt={s.reopenedAt} />
+      <FocusLaneAlerts state={state} sessionId={sessionId} />
+      {board.suspendedLanes.length > 0 && (
+        <div className="alert danger">⛔ 泳道临停中：
+          {board.suspendedLanes.map((l) => `${zoneLabel(state, l.zoneId)} ${l.lane}号道（${l.reason}）`).join('；')}
+          。该泳道已停止放行，救援收尾确认后恢复。
+        </div>
+      )}
       {board.thunderAlert && <div className="alert danger">⛈️ 雷雨临近预警生效中：鸣哨清场流程已启动，所有泳客须立即上岸！</div>}
 
       <div className="grid cols-4" style={{ marginBottom: 14 }}>
@@ -52,6 +60,12 @@ function Board({ state, sessionId, setSessionId }: { state: AppState; sessionId:
                 {z.zoneId === 'deep' && ` · 在池持深水证 ${z.deepCertHoldersInPool}/${z.inPool} 人`}
                 {z.occupancyPct > 85 && <span style={{ color: 'var(--danger)', fontWeight: 700 }}> · 接近满载，通知前台缓发</span>}
               </div>
+              {board.suspendedLanes.filter((l) => l.zoneId === z.zoneId).map((l) => (
+                <div key={`${l.lane}`} className="badge danger" style={{ marginTop: 6, marginRight: 6 }}>⛔ {l.lane} 号道临停</div>
+              ))}
+              {board.focusLanes.filter((f) => f.zoneId === z.zoneId).map((f, i) => (
+                <div key={`f${i}`} className="badge" style={{ marginTop: 6, marginRight: 6, background: 'var(--warn-bg)', color: 'var(--warn)' }}>🛟 {f.lane} 号道重点关注{f.ackAt ? '✓' : ''}</div>
+              ))}
             </div>
             );
           })}
@@ -281,6 +295,7 @@ export function LifeguardPage(props: Props) {
   if (props.tab === 'water') return <WaterEntry {...props} sessionId={sessionId} setSessionId={setSessionId} />;
   if (props.tab === 'patrol') return <Patrol {...props} sessionId={sessionId} />;
   if (props.tab === 'guard') return <GuardDuty {...props} sessionId={sessionId} />;
+  if (props.tab === 'rescue') return <RescueWorkbench state={props.state} user={props.user} sessionId={sessionId} setSessionId={setSessionId} />;
   if (props.tab === 'incident') return (
     <div className="grid cols-2">
       <IncidentCreateForm sessions={props.state.sessions} defaultSessionId={sessionId} />

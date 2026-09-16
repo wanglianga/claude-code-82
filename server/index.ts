@@ -10,6 +10,10 @@ import {
   HttpError, sessionDetail, createBooking, checkIn,
   addWaterReading, addPatrolIssue, openIncident, changePoolStatus, lockConflicts,
 } from './domain.js';
+import {
+  createCrampRescue, confirmRescueClosure, adjustRescuePost, acknowledgeFocusLane,
+  reviewCrampRescue, completeTraining,
+} from './cramp.js';
 import { buildStateView, sanitizeSessionDetail, visibleConflictsFor } from './views.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -305,6 +309,52 @@ app.post('/api/guards/:id/relief', auth, roles('lifeguard', 'ops'), (req, res) =
     return { duty, newDutyId };
   });
   res.json(result);
+});
+
+// ============ 抽筋救援记录（发现→救援→收尾三确认→站位调整→下一场关注→复盘培训排班） ============
+app.post('/api/cramp-rescues', auth, roles('lifeguard', 'ops'), (req, res) => {
+  const user = (req as any).user as User;
+  const rescue = mutate((db) => createCrampRescue(db, user, req.body));
+  res.status(201).json(rescue);
+});
+
+app.post('/api/cramp-rescues/:id/closure/:key', auth, roles('lifeguard', 'ops'), (req, res) => {
+  const user = (req as any).user as User;
+  const rescue = mutate((db) => confirmRescueClosure(db, user, req.params.id, req.params.key, req.body || {}));
+  res.json(rescue);
+});
+
+app.post('/api/cramp-rescues/:id/adjust', auth, roles('lifeguard', 'ops'), (req, res) => {
+  const user = (req as any).user as User;
+  const result = mutate((db) => adjustRescuePost(db, user, req.params.id, req.body || {}));
+  res.json(result);
+});
+
+app.post('/api/sessions/:id/focus-lanes/ack', auth, roles('lifeguard', 'ops'), (req, res) => {
+  const user = (req as any).user as User;
+  const focus = mutate((db) => acknowledgeFocusLane(db, user, req.params.id, {
+    rescueId: String(req.body?.rescueId || ''), zoneId: req.body?.zoneId, lane: Number(req.body?.lane),
+  }));
+  res.json(focus);
+});
+
+app.post('/api/cramp-rescues/:id/review', auth, roles('ops'), (req, res) => {
+  const user = (req as any).user as User;
+  const result = mutate((db) => reviewCrampRescue(db, user, req.params.id, req.body || {}));
+  res.json(result);
+});
+
+app.post('/api/guard-training/:id/done', auth, roles('lifeguard', 'ops'), (req, res) => {
+  const user = (req as any).user as User;
+  const item = mutate((db) => {
+    const t = db.guardTraining.find((x) => x.id === req.params.id);
+    if (!t) throw new HttpError(404, '培训项不存在');
+    // 救生员只能登记本人参训（或面向全体）的培训项；运营可代确认
+    if (user.role === 'lifeguard' && t.targetGuardNames.length > 0 && !t.targetGuardNames.includes(user.name))
+      throw new HttpError(403, '该培训项不包含您，不能登记参训');
+    return completeTraining(db, req.params.id, String(req.body?.result || '') || undefined);
+  });
+  res.json(item);
 });
 
 // ============ 锁区（商业包场/教学道） ============

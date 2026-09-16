@@ -16,6 +16,33 @@ function userName(state: AppState, id: string) {
   return state.users.find((u) => u.id === id);
 }
 
+/** 现场抽筋救援动态：前台据此联系陪同人/家属、拨打 120、取 AED，并掌握临停泳道 */
+function RescueStrip({ state, sessionId }: { state: AppState; sessionId: string }) {
+  const rescues = state.crampRescues.filter((r) => r.sessionId === sessionId)
+    .filter((r) => r.laneSuspended || !r.reviewedAt);
+  if (rescues.length === 0) return null;
+  const zoneName = (z: string) => state.zones.find((x) => x.id === z)?.name ?? z;
+  return (
+    <div style={{ marginBottom: 12 }}>
+      {rescues.map((r) => (
+        <div key={r.id} className={`alert ${r.medicalAdvised ? 'danger' : 'warn'}`} style={{ marginBottom: 6 }}>
+          <div className="flex">
+            <b>🆘 抽筋救援 {r.code}：{zoneName(r.zoneId)} {r.lane} 号道</b>
+            <span className="spacer" />
+            {r.familyContacted ? <Badge tone="ok">家属已联系</Badge> : <Badge tone="warn">待联系家属/陪同人</Badge>}
+            {r.medicalAdvised ? <Badge tone="danger">已建议就医/呼叫 120</Badge> : <Badge tone="gray">未建议就医</Badge>}
+            {r.laneSuspended ? <Badge tone="danger">泳道临停</Badge> : <Badge tone="ok">泳道已恢复</Badge>}
+          </div>
+          <div className="small muted" style={{ marginTop: 4 }}>
+            {fmtDateTime(r.foundAt)} 发现 · 救生员 {r.guardName} · {r.patronDesc}
+            {r.familyNote ? ` · 家属：${r.familyNote}` : ''}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function CheckInDesk({ user, state }: Props) {
   const act = useAction();
   const notify = useNotify();
@@ -67,6 +94,8 @@ function CheckInDesk({ user, state }: Props) {
     <div>
       <SessionPicker sessions={state.sessions} value={sessionId} onChange={(v) => { setSessionId(v); setSelected(null); }} />
       <PoolStatusBanner status={session.poolStatus} reason={session.statusReason} requireRetest={session.requireWaterRetest} closedAt={session.closedAt} reopenedAt={session.reopenedAt} />
+
+      <RescueStrip state={state} sessionId={sessionId} />
 
       <div className="grid cols-4" style={{ marginBottom: 14 }}>
         {board.zones.map((z) => (

@@ -100,7 +100,10 @@ function BookingForm({ user, state }: { user: User; state: AppState }) {
           {(kind === 'personal' || kind === 'coaching') && (
             <label className="field">泳道
               <select value={lane} onChange={(e) => setLane(Number(e.target.value))}>
-                {[1, 2, 3, 4, 5, 6].map((n) => <option key={n} value={n}>{n} 号道</option>)}
+                {[1, 2, 3, 4, 5, 6].map((n) => {
+                  const suspended = board.suspendedLanes.find((l) => l.zoneId === zoneId && l.lane === n);
+                  return <option key={n} value={n} disabled={!!suspended}>{n} 号道{suspended ? '（临时关闭）' : ''}</option>;
+                })}
               </select>
             </label>
           )}

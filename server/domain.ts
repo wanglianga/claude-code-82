@@ -219,6 +219,10 @@ export function createBooking(db: DB, userId: string, req: {
   const zone = db.zones.find((z) => z.id === req.zoneId);
   if (!zone) throw new HttpError(404, '泳区不存在');
   if (!req.healthPledge) throw new HttpError(400, '必须勾选健康承诺后方可预约');
+  // 抽筋救援等现场处置中的临停泳道不得预约
+  const suspendedLane = (session.suspendedLanes ?? []).find((l) => l.zoneId === req.zoneId && l.lane === req.lane);
+  if (suspendedLane)
+    throw new HttpError(409, `${zone.name} ${req.lane} 号道因现场救援临时关闭，请改选其他泳道或稍后再试`);
   if (req.age < 14 && !(req.withChildren || req.kind === 'parent_child'))
     throw new HttpError(400, '14 岁以下儿童须由成人陪同，按亲子时段预约');
   if (zone.requireCert && !user.deepCert)
@@ -334,6 +338,12 @@ export function checkIn(db: DB, bookingId: string, operator: string, req: {
   if (session.poolStatus === 'restricted') throw new HttpError(409, `本场限流中：${session.statusReason || '水质/天气异常待复测'}，暂不放行`);
   if (session.poolStatus === 'partial' && (session.affectedZoneIds ?? []).includes(b.zoneId))
     throw new HttpError(409, `该泳区因${session.statusReason || '水质异常'}暂停开放，请为泳客改约其他泳区或办理退款`);
+  // 预约泳道因抽筋救援临停：不得放行到该泳道（泳道级拦截，不影响同泳区其他泳道）
+  const suspendedLane = b.lane != null
+    ? (session.suspendedLanes ?? []).find((l) => l.zoneId === b.zoneId && l.lane === b.lane)
+    : undefined;
+  if (suspendedLane)
+    throw new HttpError(409, `${b.lane} 号道因${suspendedLane.reason}临时关闭，请为泳客改道或稍后放行`);
   if (req.healthCode !== 'green') throw new HttpError(400, '健康码非绿码/已过期，请引导居民更新后再核验');
 
   const user = db.users.find((u) => u.id === b.userId)!;
@@ -1034,6 +1044,8 @@ export function liveBoard(db: DB, sessionId?: string): LiveBoard {
     poolStatus: session.poolStatus,
     thunderAlert: openIncidents.some((i) => i.type === 'thunderstorm'),
     equipment: db.equipment,
+    focusLanes: session.guardFocusLanes ?? [],
+    suspendedLanes: session.suspendedLanes ?? [],
   };
 }
 

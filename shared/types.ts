@@ -136,7 +136,39 @@ export interface Session {
   affectedZoneIds?: ZoneId[];
   /** 计划复测时间（ISO），页面向居民/救生展示 */
   retestPlannedAt?: string;
+  /** 救援临停中的泳道（抽筋救援后泳道临停，收尾确认后解除） */
+  suspendedLanes?: SuspendedLane[];
+  /** 本场救生巡查需重点关注的泳道（由既往场次抽筋救援站位调整带入） */
+  guardFocusLanes?: GuardFocusLane[];
+  /** 本场发生的抽筋救援数（复盘统计） */
+  crampRescueCount?: number;
   createdAt: string;
+}
+
+/** 泳道临停（抽筋救援等现场处置） */
+export interface SuspendedLane {
+  zoneId: ZoneId;
+  lane: number;
+  reason: string;
+  since: string;
+  /** 关联救援记录 */
+  rescueId: string;
+}
+
+/** 下一场救生巡查重点关注泳道（站位调整后自动带入后续场次） */
+export interface GuardFocusLane {
+  zoneId: ZoneId;
+  lane: number;
+  reason: string;
+  /** 来源救援记录 */
+  rescueId: string;
+  /** 来源场次 */
+  fromSessionId: string;
+  /** 生成时间 */
+  at: string;
+  /** 下一场救生员巡查确认已重点关注 */
+  ackAt?: string;
+  ackBy?: string;
 }
 
 export type LockReason = 'institution_rental' | 'coaching' | 'maintenance' | 'private_event';
@@ -201,6 +233,114 @@ export interface GuardDuty {
   end?: string;
   relief?: string;         // 换岗接班人
   note?: string;
+  /** 因抽筋救援换岗：关联救援记录 id（复盘时统计救援处置） */
+  crampRescueId?: string;
+}
+
+// ============ 抽筋救援记录 ============
+
+/** 救援方式 */
+export type RescueMethod = 'shore_reach' | 'wading' | 'swim' | 'spinal_board' | 'aed_first_aid';
+export const RESCUE_METHOD_LABEL: Record<RescueMethod, string> = {
+  shore_reach: '岸上伸援（伸手/抛绳）',
+  wading: '下水搀扶上岸',
+  swim: '游泳拖带上岸',
+  spinal_board: '脊柱板固定转运',
+  aed_first_aid: 'AED/心肺复苏急救',
+};
+
+/** 抽筋部位 */
+export type CrampPart = 'calf' | 'thigh' | 'foot' | 'abdomen' | 'other';
+export const CRAMP_PART_LABEL: Record<CrampPart, string> = {
+  calf: '小腿', thigh: '大腿', foot: '足底/脚趾', abdomen: '腹部', other: '其他部位',
+};
+
+/** 收尾确认项（救援结束后必须逐项确认） */
+export type RescueClosureKey = 'guard_relief' | 'lane_reopen' | 'order_restored';
+export const RESCUE_CLOSURE_LABEL: Record<RescueClosureKey, string> = {
+  guard_relief: '救生员换岗确认',
+  lane_reopen: '泳道临停解除确认',
+  order_restored: '水面秩序恢复确认',
+};
+
+export interface RescueClosureState {
+  done: boolean;
+  at?: string;
+  by?: string;
+  note?: string;
+}
+
+/** 站位调整（救援后记录：从哪个岗调整、加强哪个岗/哪条泳道） */
+export interface CrampPostAdjustment {
+  at: string;
+  by: string;
+  /** 调整说明，如「深水区瞭望台加派机动巡视，重点盯 3 号道」 */
+  content: string;
+}
+
+/** 复盘结果：进入救生员培训 */
+export interface GuardTrainingItem {
+  id: string;
+  source: 'cramp_rescue' | 'incident' | 'routine';
+  sourceRescueId?: string;
+  sourceIncidentId?: string;
+  sessionId: string;
+  sessionLabel: string;
+  at: string;
+  title: string;
+  /** 培训要点（复盘结论） */
+  content: string;
+  /** 需参加培训的救生员（姓名）；空 = 全体救生员 */
+  targetGuardNames: string[];
+  /** 是否排入近期救生排班（加强岗/带教） */
+  intoSchedule: boolean;
+  scheduleNote?: string;
+  recordedBy: string;
+  done: boolean;
+  doneAt?: string;
+}
+
+export interface CrampRescue {
+  id: string;
+  code: string;              // CR-xxxx
+  sessionId: string;
+  zoneId: ZoneId;
+  /** 抽筋泳道（泳客在泳道抽筋） */
+  lane: number;
+  /** 发现时间 */
+  foundAt: string;
+  /** 发现/记录救生员 */
+  guardName: string;
+  crampPart: CrampPart;
+  /** 泳客描述（不强制关联预约，避免暴露不必要 PII；可写柜号/外貌/会员） */
+  patronDesc: string;
+  method: RescueMethod;
+  /** 上岸处理（拉伸、保暖、观察、AED 等） */
+  shoreTreatment: string;
+  /** 是否联系家属 */
+  familyContacted: boolean;
+  familyNote?: string;
+  /** 是否建议就医 */
+  medicalAdvised: boolean;
+  medicalNote?: string;
+  /** 关联协同事件 id（自动立案泳客抽筋） */
+  incidentId?: string;
+  /** 收尾三项确认 */
+  closure: Record<RescueClosureKey, RescueClosureState>;
+  /** 站位调整记录（可多次） */
+  adjustments: CrampPostAdjustment[];
+  /** 该泳道是否仍处临停（收尾确认泳道恢复后置为 false） */
+  laneSuspended: boolean;
+  laneSuspendReason?: string;
+  /** 复盘时间与结论（运营组织本场复盘） */
+  reviewedAt?: string;
+  reviewedBy?: string;
+  reviewSummary?: string;
+  /** 复盘生成的培训项 id */
+  trainingIds: string[];
+  /** 复盘是否进入排班（关注泳道提醒在新场次自动生效，排班调整在培训项中记录） */
+  intoSchedule: boolean;
+  createdAt: string;
 }
 
 /** 运营巡查记录 */
@@ -556,6 +696,10 @@ export interface LiveBoard {
   poolStatus: PoolStatus;
   thunderAlert: boolean;
   equipment: Equipment[];
+  /** 本场救生巡查重点关注泳道（上一场抽筋救援站位调整带入） */
+  focusLanes: GuardFocusLane[];
+  /** 本场临停中的泳道 */
+  suspendedLanes: SuspendedLane[];
 }
 
 export interface DB {
@@ -575,6 +719,10 @@ export interface DB {
   lessons: CoachingLesson[];
   /** 全部场次的闭池处置档案（不可变快照） */
   closureRecords: ClosureRecord[];
+  /** 抽筋救援记录 */
+  crampRescues: CrampRescue[];
+  /** 救生员培训项（复盘结果进入培训与排班） */
+  guardTraining: GuardTrainingItem[];
   counters: Record<string, number>;
   seededAt: string;
 }
@@ -695,6 +843,50 @@ export interface GuardReliefReq {
   note?: string;
 }
 
+// ============ 抽筋救援 ============
+export interface CrampRescueReq {
+  sessionId: string;
+  zoneId: ZoneId;
+  lane: number;
+  /** 发现时间（ISO，可由前端传入；缺省服务端取当前时间） */
+  foundAt?: string;
+  crampPart: CrampPart;
+  patronDesc: string;
+  method: RescueMethod;
+  shoreTreatment: string;
+  familyContacted: boolean;
+  familyNote?: string;
+  medicalAdvised: boolean;
+  medicalNote?: string;
+}
+
+export interface RescueClosureReq {
+  note?: string;
+  /** 换岗确认时：接班人姓名（救生员名册内），服务端联动完成换岗 */
+  relief?: string;
+}
+
+export interface RescueAdjustReq {
+  content: string;
+  /** 是否把该泳道写入后续场次重点关注（默认 true） */
+  propagateToNextSessions?: boolean;
+}
+
+export interface RescueReviewReq {
+  summary: string;
+  /** 培训要点 */
+  trainingContent: string;
+  /** 参加培训救生员（姓名）；空 = 全体救生员 */
+  targetGuardNames?: string[];
+  /** 是否进入近期排班（加强岗/带教） */
+  intoSchedule: boolean;
+  scheduleNote?: string;
+}
+
+export interface TrainingDoneReq {
+  result?: string;
+}
+
 export interface LockReq {
   sessionId: string;
   zoneId: ZoneId;
@@ -741,6 +933,10 @@ export interface StateView {
   lessons: CoachingLesson[];
   /** 闭池处置档案：ops 全量；其他角色为按本人/脱敏裁剪后的快照 */
   closureRecords: ClosureRecord[];
+  /** 抽筋救援记录：救生员/运营/前台可见；保洁/维修仅见本岗协同事件关联；居民不可见 */
+  crampRescues: CrampRescue[];
+  /** 救生员培训项（运营全量；救生员见与本人/全体相关项） */
+  guardTraining: GuardTrainingItem[];
   boards: LiveBoard[];
   conflicts: { sessionId: string; sessionLabel: string; message: string }[];
 }

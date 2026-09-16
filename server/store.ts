@@ -12,8 +12,12 @@ function load(): DB {
       if (data && data.users && data.sessions) {
         // 兼容旧版本数据卷：补齐新增的闭池档案集合与场次字段
         if (!Array.isArray(data.closureRecords)) data.closureRecords = [];
+        if (!Array.isArray(data.crampRescues)) data.crampRescues = [];
+        if (!Array.isArray(data.guardTraining)) data.guardTraining = [];
         for (const s of data.sessions) {
           if (!Array.isArray(s.closureIds)) s.closureIds = [];
+          if (!Array.isArray(s.suspendedLanes)) s.suspendedLanes = [];
+          if (!Array.isArray(s.guardFocusLanes)) s.guardFocusLanes = [];
         }
         return data;
       }

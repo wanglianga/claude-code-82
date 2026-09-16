@@ -11,6 +11,10 @@ import {
 } from '../ui.js';
 import { SessionPicker, LifecycleSteps, PoolStatusBanner, Stat } from '../components/common.js';
 import { IncidentList, IncidentCreateForm } from '../components/incident.js';
+import { RescueCard, TrainingRow, rescueStatus, zoneLabel } from '../components/cramp.js';
+import {
+  CRAMP_PART_LABEL, RESCUE_METHOD_LABEL, RESCUE_CLOSURE_LABEL,
+} from '../../shared/types.js';
 
 type Props = { user: User; state: AppState; tab: string };
 
@@ -47,6 +51,18 @@ function buildTimeline(state: AppState, sessionId: string): TL[] {
   for (const d of state.guardDuties.filter((d) => d.sessionId === sessionId)) {
     tl.push({ at: d.start, title: `救生员上哨：${userName(state, d.guardUserId)?.name} @ ${d.post}`, who: '救生端' });
     if (d.end) tl.push({ at: d.end, title: `救生员下哨/换岗${d.relief ? `：接班人 ${d.relief}` : ''}${d.note ? `（${d.note}）` : ''}`, tone: 'ok', who: '救生端' });
+  }
+  for (const r of state.crampRescues.filter((x) => x.sessionId === sessionId)) {
+    tl.push({
+      at: r.foundAt, tone: 'danger', who: r.guardName,
+      title: `抽筋救援 ${r.code}：${zoneLabel(state, r.zoneId)} ${r.lane} 号道 ${CRAMP_PART_LABEL[r.crampPart]}（${RESCUE_METHOD_LABEL[r.method]}）${r.familyContacted ? '·家属已联系' : ''}${r.medicalAdvised ? '·建议就医' : ''}`,
+    });
+    (['guard_relief', 'lane_reopen', 'order_restored'] as const).forEach((k) => {
+      const c = r.closure[k];
+      if (c.done) tl.push({ at: c.at!, title: `救援 ${r.code}：${RESCUE_CLOSURE_LABEL[k]}`, tone: 'ok', who: c.by ?? '' });
+    });
+    r.adjustments.forEach((a) => tl.push({ at: a.at, title: `救援 ${r.code} 站位调整：${a.content}`, who: a.by }));
+    if (r.reviewedAt) tl.push({ at: r.reviewedAt, title: `救援 ${r.code} 本场复盘完成 → 培训${r.intoSchedule ? '与排班' : ''}已生成`, tone: 'ok', who: r.reviewedBy ?? '运营' });
   }
   for (const t of state.workTasks.filter((t) => t.sessionId === sessionId && t.doneAt))
     tl.push({ at: t.doneAt!, title: `工单完成：${t.title} — ${t.result}`, tone: 'ok', who: t.assigneeName ?? '' });
@@ -570,6 +586,108 @@ function bookingsDone(state: AppState, sessionId: string) {
   return list.length ? `已处理 ${list.length} 笔（退费/补偿到账）` : '进行中';
 }
 
+// ============ 抽筋救援复盘 → 培训 / 排班 ============
+function RescueReviewTab({ state }: Props) {
+  const [sessionId, setSessionId] = useState(state.boards[1]?.session.id ?? state.boards[0].session.id);
+  const list = state.crampRescues.filter((r) => r.sessionId === sessionId);
+  const pendingReview = list.filter((r) => !r.reviewedAt
+    && (['guard_relief', 'lane_reopen', 'order_restored'] as const).every((k) => r.closure[k].done));
+
+  return (
+    <div>
+      <SessionPicker sessions={state.sessions} value={sessionId} onChange={setSessionId} />
+      <div className="grid cols-2">
+        <div className="grid">
+          <Card title={`本场抽筋救援记录（${list.length}）`}>
+            {list.length === 0 ? <Empty text="本场暂无抽筋救援" /> :
+              list.map((r) => (
+                <div key={r.id} style={{ marginBottom: 12 }}>
+                  <RescueCard rescue={r} state={state} user={{ role: 'ops' } as User} />
+                  {!r.reviewedAt && <ReviewForm rescue={r} state={state} canReview={pendingReview.some((x) => x.id === r.id)} />}
+                </div>
+              ))}
+          </Card>
+        </div>
+        <div className="grid">
+          <Card title="复盘结论 → 救生员培训与排班">
+            {state.guardTraining.length === 0 ? <Empty text="暂无复盘培训项" /> :
+              state.guardTraining.map((t) => <TrainingRow key={t.id} t={t} state={state} user={{ role: 'ops' } as User} />)}
+          </Card>
+          <Card title="后续场次重点关注泳道（站位调整自动带入）">
+            {state.sessions.filter((s) => (s.guardFocusLanes ?? []).length > 0).length === 0 ? <Empty text="暂无" /> :
+              state.sessions.filter((s) => (s.guardFocusLanes ?? []).length > 0).map((s) => (
+                <div key={s.id} className="queue-row">
+                  <div>
+                    <b className="small">{s.label}</b>
+                    {(s.guardFocusLanes ?? []).map((f, i) => (
+                      <div key={i} className="small muted">
+                        🛟 {state.zones.find((z) => z.id === f.zoneId)?.name} {f.lane} 号道{f.ackBy ? ` · ${f.ackBy}已确认关注` : ''}
+                        <div>{f.reason}</div>
+                      </div>
+                    ))}
+                  </div>
+                  <Badge tone="warn">下一场重点</Badge>
+                </div>
+              ))}
+          </Card>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ReviewForm({ rescue, state, canReview }: { rescue: import('../../shared/types.js').CrampRescue; state: AppState; canReview: boolean }) {
+  const act = useAction();
+  const notify = useNotify();
+  const guards = state.users.filter((u) => u.role === 'lifeguard');
+  const [summary, setSummary] = useState('');
+  const [content, setContent] = useState(
+    `${CRAMP_PART_LABEL[rescue.crampPart]}抽筋的识别与${RESCUE_METHOD_LABEL[rescue.method]}要点复训；加强${zoneLabel(state, rescue.zoneId)} ${rescue.lane} 号道瞭望，提醒泳客下水前热身。`,
+  );
+  const [targets, setTargets] = useState<string[]>([rescue.guardName]);
+  const [intoSchedule, setIntoSchedule] = useState(true);
+  const [scheduleNote, setScheduleNote] = useState(`近期排班加强${zoneLabel(state, rescue.zoneId)}岗位瞭望/带教`);
+
+  const toggle = (name: string) =>
+    setTargets((t) => (t.includes(name) ? t.filter((x) => x !== name) : [...t, name]));
+
+  if (!canReview) {
+    const pending = (['guard_relief', 'lane_reopen', 'order_restored'] as const).filter((k) => !rescue.closure[k].done);
+    return <div className="alert warn" style={{ marginTop: 8 }}>收尾确认未完成（缺：{pending.map((k) => RESCUE_CLOSURE_LABEL[k]).join('、')}），救生员完成三确认后才能组织本场复盘。</div>;
+  }
+
+  return (
+    <div className="notif warning" style={{ marginTop: 8 }}>
+      <b>组织本场复盘（复盘结果进入救生员培训与排班）</b>
+      <label className="field" style={{ marginTop: 8 }}>复盘结论
+        <textarea value={summary} onChange={(e) => setSummary(e.target.value)} placeholder="发现是否及时、施救是否规范、暴露的站位/预案问题…" />
+      </label>
+      <label className="field" style={{ marginTop: 8 }}>培训要点
+        <textarea value={content} onChange={(e) => setContent(e.target.value)} />
+      </label>
+      <div className="small muted" style={{ margin: '6px 0 2px' }}>参训救生员（不勾=全体救生员）：</div>
+      <div className="flex" style={{ flexWrap: 'wrap', gap: 8 }}>
+        {guards.map((g) => (
+          <label key={g.id} className="checkbox" style={{ margin: 0 }}>
+            <input type="checkbox" checked={targets.includes(g.name)} onChange={() => toggle(g.name)} />{g.name}
+          </label>
+        ))}
+      </div>
+      <label className="checkbox" style={{ marginTop: 8 }}><input type="checkbox" checked={intoSchedule} onChange={(e) => setIntoSchedule(e.target.checked)} /> 同步进入近期救生排班（加强岗/带教）</label>
+      {intoSchedule && <input style={{ marginTop: 6 }} value={scheduleNote} onChange={(e) => setScheduleNote(e.target.value)} />}
+      <div style={{ marginTop: 8 }}>
+        <button className="btn sm danger" disabled={act.isPending || !summary.trim() || !content.trim()}
+          onClick={() => act.mutateAsync({
+            path: `/cramp-rescues/${rescue.id}/review`,
+            body: { summary, trainingContent: content, targetGuardNames: targets, intoSchedule, scheduleNote },
+          }).then(() => notify.ok('复盘完成：培训项已生成并同步排班')).catch((e) => notify.err(e))}>
+          提交复盘并生成培训项
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // ============ 事件指挥 ============
 function IncidentTab({ user, state }: Props) {
   return (
@@ -663,6 +781,7 @@ function Complaints({ state }: Props) {
 }
 
 export function OpsPage(props: Props) {
+  if (props.tab === 'rescue') return <RescueReviewTab {...props} />;
   if (props.tab === 'conflict') return <Conflicts {...props} />;
   if (props.tab === 'close') return <CloseReopen {...props} />;
   if (props.tab === 'incident') return <IncidentTab {...props} />;
