@@ -35,15 +35,17 @@ function Board({ state, sessionId, setSessionId }: { state: AppState; sessionId:
 
       <div className="grid cols-2">
         <Card title="各泳区实时人数与权限">
-          {board.zones.map((z) => (
-            <div key={z.zoneId} className={`zone-card ${z.zoneId === 'deep' ? 'risk-high' : ''}`} style={{ marginBottom: 10 }}>
+          {board.zones.map((z) => {
+            const suspended = (s.affectedZoneIds ?? []).includes(z.zoneId);
+            return (
+            <div key={z.zoneId} className={`zone-card ${z.zoneId === 'deep' ? 'risk-high' : ''} ${suspended ? 'risk-high' : ''}`} style={{ marginBottom: 10, opacity: suspended ? 0.7 : 1 }}>
               <div className="zone-head">
-                <b>{z.name}{z.deepCertRequired && <span className="badge danger" style={{ marginLeft: 6 }}>深水权限</span>}</b>
+                <b>{z.name}{z.deepCertRequired && <span className="badge danger" style={{ marginLeft: 6 }}>深水权限</span>}{suspended && <span className="badge danger" style={{ marginLeft: 6 }}>暂停开放</span>}</b>
                 <span className="small muted">
-                  {z.inPool} 在池 / {z.booked} 待入{z.locked > 0 && ` / ${z.locked} 商业锁定`} · 容量 {z.capacity}
+                  {suspended ? '水质处置中·禁止入池' : `${z.inPool} 在池 / ${z.booked} 待入`}{!suspended && z.locked > 0 && ` / ${z.locked} 商业锁定`} · 容量 {z.capacity}
                 </span>
               </div>
-              <div className="meter"><i className={z.occupancyPct > 85 ? 'hot' : ''} style={{ width: `${Math.min(100, z.occupancyPct)}%` }} /></div>
+              <div className="meter"><i className={z.occupancyPct > 85 ? 'hot' : ''} style={{ width: `${suspended ? 100 : Math.min(100, z.occupancyPct)}%`, background: suspended ? 'var(--danger)' : undefined }} /></div>
               <div className="small muted">
                 占用率 {z.occupancyPct}%
                 {z.zoneId === 'family' && z.children > 0 && ` · 在场儿童 ${z.children} 人（须一对一陪同）`}
@@ -51,7 +53,8 @@ function Board({ state, sessionId, setSessionId }: { state: AppState; sessionId:
                 {z.occupancyPct > 85 && <span style={{ color: 'var(--danger)', fontWeight: 700 }}> · 接近满载，通知前台缓发</span>}
               </div>
             </div>
-          ))}
+            );
+          })}
           <h4>在岗救生员站位</h4>
           {board.guardOnDuty.length === 0 ? <div className="alert warn">暂无救生员上哨！请到「站位与换岗」上哨。</div> :
             board.guardOnDuty.map((g, i) => (

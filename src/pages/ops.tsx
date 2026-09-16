@@ -75,6 +75,10 @@ function zh(n: number) {
   return ['零', '一', '二', '三', '四', '五', '六', '七', '八', '九', '十'][n] ?? String(n);
 }
 
+function dispositionLabel(d: string) {
+  return d === 'partial' ? '部分开放' : d === 'postponed' ? '延期' : '闭池';
+}
+
 /** 按原支付渠道描述退款/返还结果（财务结算与居民通知口径一致） */
 function refundResultText(a: import('../../shared/types.js').ClosureAffectedItem) {
   if (!a.refunded || !a.refund) return '未退款';
@@ -300,18 +304,36 @@ function CloseReopen({ state, user }: Props) {
   const act = useAction();
   const notify = useNotify();
   const [sessionId, setSessionId] = useState(state.boards[1]?.session.id ?? state.boards[0].session.id);
-  const [reason, setReason] = useState('雷电预警，暂停开放');
-  const [cause, setCause] = useState<IncidentType | 'other'>('thunderstorm');
+  const [reason, setReason] = useState('余氯不足/浊度超标，部分泳区暂停开放');
+  const [cause, setCause] = useState<IncidentType | 'other'>('water_abnormal');
   const [refund, setRefund] = useState(true);
   const [voucher, setVoucher] = useState(true);
   const [push, setPush] = useState(true);
   const [retest, setRetest] = useState(true);
+  const [disposition, setDisposition] = useState<'closed' | 'partial' | 'postponed'>('partial');
+  const [zonePicks, setZonePicks] = useState<Record<string, boolean>>({ training: true });
+  const [postponeTo, setPostponeTo] = useState('');
+  const [retestInMin, setRetestInMin] = useState(60);
 
   const session = state.sessions.find((s) => s.id === sessionId)!;
   const affected = state.bookings.filter((b) => b.sessionId === sessionId && (b.status === 'booked' || b.status === 'checked_in'));
   const estWallet = affected.filter((b) => b.paymentMethod === 'wallet').reduce((s, b) => s + b.paidAmount, 0);
   const estVoucher = affected.filter((b) => b.paymentMethod === 'voucher').length;
   const estCash = affected.filter((b) => b.paymentMethod === 'cash').reduce((s, b) => s + b.paidAmount, 0);
+
+  // 受影响泳区集合（闭池/延期=全部；部分开放=勾选）
+  const allZoneIds = state.zones.map((z) => z.id);
+  const chosenZoneIds = disposition === 'partial' ? allZoneIds.filter((id) => zonePicks[id]) : allZoneIds;
+  const affectedByZone = (b: typeof affected[number]) => chosenZoneIds.includes(b.zoneId);
+  // 三类人群（仅受影响泳区）
+  const inAffected = affected.filter(affectedByZone);
+  const lessonsIn = state.lessons.filter((l) => l.sessionId === sessionId && chosenZoneIds.includes(l.zoneId));
+  const coachingUserIds = new Set(lessonsIn.flatMap((l) => l.studentIds));
+  const groupCheckedIn = inAffected.filter((b) => b.status === 'checked_in' && !coachingUserIds.has(b.userId));
+  const groupNotIn = inAffected.filter((b) => b.status === 'booked' && !coachingUserIds.has(b.userId));
+  const groupCoaching = inAffected.filter((b) => coachingUserIds.has(b.userId));
+  const retestPlannedAt = retest ? new Date(Date.now() + retestInMin * 60000).toISOString() : undefined;
+  const futureSessions = state.sessions.filter((s) => s.id !== sessionId);
 
   // 恢复门禁以“当前生效闭池档案”为唯一依据（清场清洁 + 消毒复测 + 必要的达标水质）
   const activeRecord = state.closureRecords.find((r) => r.id === session.activeClosureId);
@@ -329,16 +351,27 @@ function CloseReopen({ state, user }: Props) {
     : [];
   const retestPass = afterCloseReadings.some((w) => !w.abnormal);
   const waterRequired = activeRecord?.requireWaterRetest;
-  const canReopen = !!activeRecord && cleaningDone && disinfectionDone && (!waterRequired || retestPass);
+  const needCleaning = activeRecord?.disposition === 'closed' || activeRecord?.disposition === 'postponed';
+  const canReopen = !!activeRecord && disinfectionDone && (!needCleaning || cleaningDone) && (!waterRequired || retestPass);
   const reopenBlockers = [
-    !cleaningDone ? '清场清洁工单未完成' : '',
+    needCleaning && !cleaningDone ? '清场清洁工单未完成' : '',
     !disinfectionDone ? '消毒复测工单未完成' : '',
     waterRequired && !retestPass ? '尚无达标水质复测' : '',
   ].filter(Boolean);
 
-  const close = () =>
-    act.mutateAsync({ path: '/pool-status', body: { sessionId, status: 'closed', reason, cause, refund, compVoucher: voucher, notifyResidents: push, requireWaterRetest: retest } })
-      .then((r: any) => notify.ok(`闭池联动完成：储值退 ${r.walletRefundCount ?? 0} 笔、原券返还 ${r.originalVoucherReturnCount ?? 0} 张、现场登记 ${r.cashRefundCount ?? 0} 笔、额外补偿券 ${r.extraVoucherCount ?? 0} 张`)).catch((e) => notify.err(e));
+  const submitDisposition = () => {
+    if (disposition === 'partial' && chosenZoneIds.length === 0) { notify.err('请至少选择一个暂停泳区'); return; }
+    if (disposition === 'postponed' && !postponeTo) { notify.err('请选择顺延目标场次'); return; }
+    const body = {
+      sessionId, status: 'closed' as const, reason, cause,
+      disposition, affectedZoneIds: chosenZoneIds, retestPlannedAt,
+      postponeToSessionId: disposition === 'postponed' ? postponeTo : undefined,
+      refund, compVoucher: voucher, notifyResidents: push, requireWaterRetest: retest,
+    };
+    act.mutateAsync({ path: '/pool-status', body })
+      .then((r: any) => notify.ok(`处置完成：储值退 ${r.walletRefundCount ?? 0} 笔、券 ${r.extraVoucherCount ?? 0} 张、课程顺延 ${r.lessonPostponed ?? 0} 节`))
+      .catch((e) => notify.err(e));
+  };
   const reopen = () =>
     act.mutateAsync({ path: '/pool-status', body: { sessionId, status: 'normal' } })
       .then(() => notify.ok('已恢复开放，居民端/现场端状态同步刷新')).catch((e) => notify.err(e));
@@ -346,7 +379,9 @@ function CloseReopen({ state, user }: Props) {
   return (
     <div>
       <SessionPicker sessions={state.sessions} value={sessionId} onChange={setSessionId} />
-      <PoolStatusBanner status={session.poolStatus} reason={session.statusReason} requireRetest={session.requireWaterRetest} closedAt={session.closedAt} reopenedAt={session.reopenedAt} />
+      <PoolStatusBanner status={session.poolStatus} reason={session.statusReason} requireRetest={session.requireWaterRetest} closedAt={session.closedAt} reopenedAt={session.reopenedAt}
+        affectedZoneNames={(session.affectedZoneIds ?? []).map((id) => state.zones.find((z) => z.id === id)?.name ?? id)}
+        retestPlannedAt={session.retestPlannedAt} />
       <div className="grid cols-2">
         <Card title="闭池决策与一键联动">
           {session.poolStatus === 'closed' && activeRecord ? (
@@ -378,26 +413,75 @@ function CloseReopen({ state, user }: Props) {
           ) : (
             <div>
               <div className="form-row">
-                <label className="field">闭池原因分类<select value={cause} onChange={(e) => setCause(e.target.value as any)}>{CAUSES.map((c) => <option key={c.v} value={c.v}>{c.label}</option>)}</select></label>
-                <label className="field">状态
-                  <select value={session.poolStatus} onChange={(e) => {
-                    if (e.target.value === 'restricted') act.mutateAsync({ path: '/pool-status', body: { sessionId, status: 'restricted', reason: reason || '现场异常限流' } }).then(() => notify.ok('已切换为限流')).catch((x) => notify.err(x));
-                  }}>
-                    <option value="normal">正常开放</option><option value="restricted">先限流观察</option><option value="closed">闭池</option>
+                <label className="field">触发原因<select value={cause} onChange={(e) => {
+                  const v = e.target.value as IncidentType | 'other';
+                  setCause(v);
+                  if (v === 'thunderstorm') { setDisposition('closed'); setReason('雷电预警，全场暂停开放'); }
+                  if (v === 'water_abnormal') { setDisposition('partial'); setReason('余氯不足/浊度超标，受影响泳区暂停开放'); }
+                }}>{CAUSES.map((c) => <option key={c.v} value={c.v}>{c.label}</option>)}</select></label>
+                <label className="field">处置方式
+                  <select value={disposition} onChange={(e) => setDisposition(e.target.value as any)}>
+                    <option value="partial">部分开放（仅暂停受影响泳区）</option>
+                    <option value="closed">闭池（全场清场）</option>
+                    <option value="postponed">延期（顺延到后续场次）</option>
                   </select>
                 </label>
               </div>
               <div style={{ height: 10 }} />
-              <label className="field">向居民与各角色的说明<textarea value={reason} onChange={(e) => setReason(e.target.value)} /></label>
-              <div style={{ height: 10 }} />
-              <label className="checkbox"><input type="checkbox" checked={refund} onChange={(e) => setRefund(e.target.checked)} /> 预约费原路退回储值（现金单登记线下退）</label>
-              <label className="checkbox"><input type="checkbox" checked={voucher} onChange={(e) => setVoucher(e.target.checked)} /> 每人发放 1 张补偿券（可抵一次入场）</label>
-              <label className="checkbox"><input type="checkbox" checked={push} onChange={(e) => setPush(e.target.checked)} /> 向受影响居民逐人推送通知 + 全员公告</label>
-              <label className="checkbox"><input type="checkbox" checked={retest} onChange={(e) => setRetest(e.target.checked)} /> 要求水质复测达标后方可恢复开放</label>
-              <div className="alert warn" style={{ marginTop: 10 }}>
-                本次将影响 <b>{affected.length}</b> 笔预约，按原渠道分别处理：储值退 <b>¥{estWallet}</b>、原券返还 <b>{estVoucher}</b> 张、现场退款登记 <b>¥{estCash}</b>{voucher ? '，另每人发放额外补偿券 1 张' : ''}；同时自动：救生员撤哨清场、生成维修消毒复测工单与保洁清场工单、关联事件追加联动记录。
+              <label className="field">说明<textarea value={reason} onChange={(e) => setReason(e.target.value)} /></label>
+
+              {/* 受影响时段锁定视图 */}
+              <h4>受影响时段与人群</h4>
+              {disposition === 'partial' && (
+                <div>
+                  <div className="small muted" style={{ marginBottom: 6 }}>勾选暂停使用的泳区（其余泳区继续开放、可正常核验）：</div>
+                  <div className="flex" style={{ flexWrap: 'wrap', gap: 8 }}>
+                    {state.zones.map((z) => (
+                      <label key={z.id} className="checkbox" style={{ minWidth: 130 }}>
+                        <input type="checkbox" checked={!!zonePicks[z.id]} onChange={(e) => setZonePicks((p) => ({ ...p, [z.id]: e.target.checked }))} />
+                        {z.name}
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              )}
+              <div className="grid cols-3" style={{ margin: '10px 0' }}>
+                <div className="zone-card"><div className="stat"><span className="num">{groupCheckedIn.length}</span><span className="lbl">已入场（清场·安抚券）</span></div></div>
+                <div className="zone-card"><div className="stat accent"><span className="num">{groupNotIn.length}</span><span className="lbl">未入场（原路退款）</span></div></div>
+                <div className="zone-card"><div className="stat warn"><span className="num">{groupCoaching.length + lessonsIn.length}</span><span className="lbl">教练课（顺延）</span></div></div>
               </div>
-              <button className="btn danger" disabled={!reason.trim() || act.isPending} onClick={() => { if (confirm('确认闭池并执行联动？居民将立即收到通知。')) close(); }}>🚫 确认闭池并执行联动</button>
+
+              {disposition === 'postponed' && (
+                <label className="field">顺延目标场次
+                  <select value={postponeTo} onChange={(e) => setPostponeTo(e.target.value)}>
+                    <option value="">请选择…</option>
+                    {futureSessions.map((s) => <option key={s.id} value={s.id}>{s.label}</option>)}
+                  </select>
+                </label>
+              )}
+
+              <h4>复测计划</h4>
+              <label className="checkbox"><input type="checkbox" checked={retest} onChange={(e) => setRetest(e.target.checked)} /> 恢复前须达标复测</label>
+              {retest && (
+                <label className="field" style={{ marginTop: 6 }}>计划复测时间（分钟后）
+                  <select value={retestInMin} onChange={(e) => setRetestInMin(Number(e.target.value))}>
+                    {[30, 60, 90, 120, 240].map((m) => <option key={m} value={m}>{m} 分钟后</option>)}
+                  </select>
+                </label>
+              )}
+
+              <h4>补偿方式（按实际影响区分）</h4>
+              <label className="checkbox"><input type="checkbox" checked={refund} onChange={(e) => setRefund(e.target.checked)} disabled={disposition === 'postponed'} /> 未入场预约原路退款（储值退余额 / 券返原券 / 现金登记）{disposition === 'postponed' && '（延期为顺延，不退款）'}</label>
+              <label className="checkbox"><input type="checkbox" checked={voucher} onChange={(e) => setVoucher(e.target.checked)} /> 未入场额外补偿券 + 已入场安抚券（已入场不退现金）</label>
+              <label className="checkbox"><input type="checkbox" checked={push} onChange={(e) => setPush(e.target.checked)} /> 分别通知已入场 / 未入场 / 教练课用户与机构</label>
+
+              <div className="alert warn" style={{ marginTop: 10 }}>
+                将处理受影响泳区 <b>{chosenZoneIds.length}</b> 个：未入场 <b>{groupNotIn.length}</b> 笔（储值退 ¥{groupNotIn.filter((b) => b.paymentMethod === 'wallet').reduce((s, b) => s + b.paidAmount, 0)}、原券 {groupNotIn.filter((b) => b.paymentMethod === 'voucher').length} 张、现场登记 ¥{groupNotIn.filter((b) => b.paymentMethod === 'cash').reduce((s, b) => s + b.paidAmount, 0)}）、已入场 <b>{groupCheckedIn.length}</b> 人发安抚券、教练课 <b>{lessonsIn.length}</b> 节顺延；同时派发消毒复测{disposition === 'closed' || disposition === 'postponed' ? '与清场清洁' : ''}工单。
+              </div>
+              <button className="btn danger" disabled={!reason.trim() || act.isPending || (disposition === 'partial' && chosenZoneIds.length === 0) || (disposition === 'postponed' && !postponeTo)}
+                onClick={() => { if (confirm(`确认执行「${disposition === 'partial' ? '部分开放' : disposition === 'closed' ? '闭池' : '延期'}」并联动通知？`)) submitDisposition(); }}>
+                {disposition === 'partial' ? '🔶 锁定受影响泳区并执行处置' : disposition === 'closed' ? '🚫 确认闭池并执行联动' : '⏭️ 确认延期并顺延'}
+              </button>
             </div>
           )}
         </Card>
@@ -436,34 +520,38 @@ function ClosureArchives({ state, sessionId }: { state: AppState; sessionId: str
         {records.map((r) => (
           <div key={r.id} className={`notif ${r.status === 'closed' ? 'critical' : 'info'}`}>
             <div className="flex">
-              <b>第{zh(r.seq)}轮闭池 · {r.cause === 'other' ? '其他原因' : INCIDENT_TYPE_LABEL[r.cause]}</b>
+              <b>第{zh(r.seq)}轮{dispositionLabel(r.disposition)} · {r.cause === 'other' ? '其他原因' : INCIDENT_TYPE_LABEL[r.cause]}</b>
               <span className="spacer" />
-              <Badge tone={r.status === 'closed' ? 'danger' : 'ok'}>{r.status === 'closed' ? '闭池中' : '已恢复'}</Badge>
+              <Badge tone={r.status === 'closed' ? 'danger' : 'ok'}>{r.status === 'closed' ? '处置中' : '已恢复'}</Badge>
             </div>
             <div className="small" style={{ marginTop: 4 }}>原因：{r.reason}</div>
             <dl className="kv small" style={{ marginTop: 6 }}>
-              <dt>闭池时间</dt><dd>{fmtDateTime(r.closedAt)} · {r.closedBy}</dd>
+              <dt>处置时间</dt><dd>{fmtDateTime(r.closedAt)} · {r.closedBy}{r.retestPlannedAt ? ` · 计划复测 ${fmtDateTime(r.retestPlannedAt)}` : ''}</dd>
+              <dt>受影响人群</dt>
+              <dd>已入场 {r.groupCounts?.checked_in ?? 0} · 未入场 {r.groupCounts?.not_checked_in ?? 0} · 教练课 {r.groupCounts?.coaching ?? 0}{r.affectedZoneIds.length ? ` · 泳区 ${r.affectedZoneIds.length} 个` : ''}</dd>
               <dt>原渠道退款</dt>
               <dd>储值 {r.walletRefundCount} 笔/¥{r.walletRefundTotal} · 原券返还 {r.originalVoucherReturnCount} 张 · 现场登记 {r.cashRefundCount} 笔/¥{r.cashRefundTotal}
-                {r.extraVoucherCount > 0 && <span className="badge purple" style={{ marginLeft: 6 }}>额外补偿券 {r.extraVoucherCount} 张</span>}
+                {r.extraVoucherCount > 0 && <span className="badge purple" style={{ marginLeft: 6 }}>额外/安抚券 {r.extraVoucherCount} 张</span>}
               </dd>
+              <dt>教练课顺延</dt><dd>{(r.lessonPostponements ?? []).length === 0 ? '无' : r.lessonPostponements?.map((l) => `${l.lessonTitle}→${state.sessions.find((s) => s.id === l.toSessionId)?.label ?? l.toSessionId}（${l.studentCount} 人${l.institutionNotified ? '，机构已通知' : ''}）`).join('；')}</dd>
               <dt>清场</dt><dd>撤哨 {r.guardReliefCount} 人 · 联动工单 {r.taskIds.length} 个</dd>
-              <dt>通知</dt><dd>{r.announcementIds.length} 条（全员公告+逐人通知）</dd>
+              <dt>通知</dt><dd>{r.announcementIds.length} 条（全员公告+已入场/未入场/教练课逐人通知）</dd>
               <dt>恢复门禁</dt>
               <dd>{r.status === 'reopened'
                 ? `清场${r.reopenChecklist?.cleaning ? '✓(' + (r.reopenChecklist.cleaning.assigneeName ?? '保洁') + ')' : '—'} · 消毒${r.reopenChecklist?.disinfection ? '✓(' + (r.reopenChecklist.disinfection.assigneeName ?? '维修') + ')' : '—'}${r.requireWaterRetest ? ' · 水质复测✓' : ''}`
-                : '等待清场、消毒与必要复测全部完成'}</dd>
+                : '等待消毒与必要复测全部完成'}</dd>
               <dt>恢复</dt><dd>{r.status === 'reopened' ? `${fmtDateTime(r.reopenedAt)} · ${r.reopenedBy ?? ''}${r.retestReadingId ? ' · 复测 ' + r.retestReadingId + ' 达标' : ''}` : '处置未完成，禁止恢复'}</dd>
             </dl>
             <details style={{ marginTop: 6 }}>
               <summary className="small muted" style={{ cursor: 'pointer' }}>逐人处置结果（{r.affected.length}）</summary>
               <div className="table-wrap" style={{ marginTop: 6 }}><table>
-                <thead><tr><th>预约码</th><th>泳客</th><th>原渠道</th><th>原渠道退款结果</th><th>额外补偿券</th><th>通知</th></tr></thead>
+                <thead><tr><th>预约码</th><th>泳客</th><th>人群</th><th>原渠道</th><th>处置结果</th><th>额外/安抚券</th><th>通知</th></tr></thead>
                 <tbody>{r.affected.map((a) => (
                   <tr key={a.bookingId}>
                     <td className="code-mono small">{a.bookingCode}</td><td className="small">{a.userName}</td>
+                    <td className="small">{a.group === 'checked_in' ? '已入场' : a.group === 'coaching' ? '教练课' : '未入场'}{a.postponed ? '·顺延' : ''}</td>
                     <td>{a.paymentMethod === 'wallet' ? '储值' : a.paymentMethod === 'voucher' ? '补偿券' : '现场支付'}</td>
-                    <td className="small">{refundResultText(a)}</td>
+                    <td className="small">{a.postponed ? `顺延至 ${state.sessions.find((s) => s.id === a.postponeToSessionId)?.label ?? a.postponeToSessionId}` : refundResultText(a)}</td>
                     <td>{a.extraCompVoucher ? '1 张' : '—'}</td>
                     <td>{a.notificationId ? '已送达' : '—'}</td>
                   </tr>

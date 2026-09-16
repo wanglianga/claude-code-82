@@ -98,12 +98,15 @@ check('闭池联动成功', close.status === 200, JSON.stringify(close.data));
 
 const li2 = (await api('/state', t.li, undefined, 'GET')).data;
 const zhang2 = (await api('/state', t.zhang, undefined, 'GET')).data;
-check('li 只看到本人的闭池退费流水', li2.walletTxns.some((x) => x.amount > 0 && /闭池.*退储值|退储值/.test(x.reason) && x.userId === 'u-li'));
-check('li 看不到 zhang 的退费', !JSON.stringify(li2).includes('B-2061'));
-check('li 收到本人闭池通知（含其金额）', li2.notifications.some((n) => n.userId === 'u-li' && n.title.includes('闭池通知')));
-check('li 本人预约为退费+补偿状态', li2.bookings.some((b) => b.code === 'B-2062' && b.status === 'compensated'));
-check('zhang 看到自己的退费（B-2061 储值 +25）', zhang2.walletTxns.some((x) => x.amount === 25 && x.reason.includes('B-2061')));
-check('zhang 看不到 li 的退费/陪同人', !JSON.stringify(zhang2).includes('李娟') && !JSON.stringify(zhang2).includes('B-2062'));
+// B-2062 已在第⑥步核验入场，闭池时按已入场人群发安抚券（不退现金）
+check('li 的已入场预约无储值退款流水（安抚券代替）', !li2.walletTxns.some((x) => x.amount > 0 && x.closureId));
+check('li 看不到 zhang 的处置', !JSON.stringify(li2).includes('B-2061'));
+check('li 收到本人闭池通知', li2.notifications.some((n) => n.userId === 'u-li' && n.title.includes('通知')));
+check('li 本人预约为补偿状态（已入场安抚券）', li2.bookings.some((b) => b.code === 'B-2062' && b.status === 'compensated'));
+// B-2061 张为民已入场：仅安抚券、不产生 +25 钱包流水
+check('zhang 已入场预约不产生储值退款流水', !zhang2.walletTxns.some((x) => x.amount === 25 && x.reason.includes('B-2061')));
+check('zhang 因已入场获得安抚补偿券', zhang2.bookings.some((b) => b.code === 'B-2061' && b.status === 'compensated'));
+check('zhang 看不到 li 的处置/陪同人', !JSON.stringify(zhang2).includes('李娟') && !JSON.stringify(zhang2).includes('B-2062'));
 
 console.log('⑧ 运营视图完整（可指挥闭池全链路）');
 const ops = (await api('/state', t.ops, undefined, 'GET')).data;

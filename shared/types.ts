@@ -60,7 +60,8 @@ export type BookingStatus =
   | 'no_show'       // 爽约
   | 'cancelled'     // 已取消
   | 'refunded'      // 已退费（闭池）
-  | 'compensated'; // 已补偿（退费+券）
+  | 'compensated'   // 已补偿（退费+券）
+  | 'postponed';    // 已顺延到后续场次（延期处置）
 
 export interface Booking {
   id: string;
@@ -94,9 +95,13 @@ export interface Booking {
   createdAt: string;
   /** 历次闭池档案 id（退费/补偿联动时追加，可多次） */
   closureIds?: string[];
+  /** 顺延到的目标场次（延期处置） */
+  postponeToSessionId?: string;
+  /** 顺延时记录原场次 */
+  postponedFromSessionId?: string;
 }
 
-export type PoolStatus = 'normal' | 'restricted' | 'closed';
+export type PoolStatus = 'normal' | 'restricted' | 'partial' | 'closed';
 
 export interface Session {
   id: string;
@@ -121,6 +126,10 @@ export interface Session {
   closureIds: string[];
   /** 当前生效中的闭池档案 id；恢复开放后清空（历史仍在 closureIds） */
   activeClosureId?: string;
+  /** 水质异常等处置中受影响（暂停使用）的泳区；部分开放时其余泳区正常 */
+  affectedZoneIds?: ZoneId[];
+  /** 计划复测时间（ISO），页面向居民/救生展示 */
+  retestPlannedAt?: string;
   createdAt: string;
 }
 
@@ -340,6 +349,9 @@ export interface OnSiteRefundResult {
 }
 export type RefundResult = WalletRefundResult | VoucherRefundResult | OnSiteRefundResult;
 
+/** 受影响人群分组：已入场 / 未入场 / 教练课（补偿方式按实际影响区分） */
+export type AffectedGroup = 'checked_in' | 'not_checked_in' | 'coaching';
+
 export interface ClosureAffectedItem {
   bookingId: string;
   bookingCode: string;
@@ -356,9 +368,20 @@ export interface ClosureAffectedItem {
   extraCompVoucher: boolean;
   /** 兼容旧字段：等价于 extraCompVoucher */
   voucherGranted?: boolean;
+  /** 受影响人群分组 */
+  group: AffectedGroup;
+  /** 该笔预约是否处于受影响泳区（部分开放时决定是否纳入处置） */
+  inAffectedZone: boolean;
+  /** 是否顺延（延期处置时未入场/教练课） */
+  postponed?: boolean;
+  /** 顺延后的场次 id */
+  postponeToSessionId?: string;
   /** 该居民收到的逐人通知 id */
   notificationId?: string;
 }
+
+/** 处置方式：闭池 / 部分开放 / 延期 */
+export type ClosureDisposition = 'closed' | 'partial' | 'postponed';
 
 export type ClosureStatus = 'closed' | 'reopened';
 
@@ -374,6 +397,14 @@ export interface ClosureRecord {
   closedAt: string;
   closedBy: string;
   status: ClosureStatus;
+  /** 处置方式：闭池 / 部分开放 / 延期 */
+  disposition: ClosureDisposition;
+  /** 受影响（暂停使用）泳区 */
+  affectedZoneIds: ZoneId[];
+  /** 计划复测时间（ISO） */
+  retestPlannedAt?: string;
+  /** 延期目标场次 id（disposition=postponed 时） */
+  postponeToSessionId?: string;
   requireWaterRetest: boolean;
   options: { refund: boolean; compVoucher: boolean; notifyResidents: boolean };
   /** 受影响预约与逐人退费/补偿结果快照 */
@@ -412,6 +443,23 @@ export interface ClosureRecord {
     /** 必要时（requireWaterRetest）的达标水质记录快照；不需要时为 null */
     water: ClosureWaterResult | null;
   };
+  /** 教练课顺延结果（闭池发生在培训课时段时同步处理） */
+  lessonPostponements?: ClosureLessonPostpone[];
+  /** 各人群分组计数（已入场/未入场/教练课） */
+  groupCounts?: Record<AffectedGroup, number>;
+}
+
+export interface ClosureLessonPostpone {
+  lessonId: string;
+  lessonTitle: string;
+  coachName: string;
+  fromSessionId: string;
+  toSessionId: string;
+  /** 受影响学员人数 */
+  studentCount: number;
+  /** 是否通知机构账号 */
+  institutionNotified: boolean;
+  notificationId?: string;
 }
 
 /** 闭池联动工单的完成结果快照 */
@@ -460,6 +508,15 @@ export interface CoachingLesson {
   enrolled: number;
   price: number;
   studentIds: string[];
+  /** 顺延状态：原场次水质异常闭池时，课程顺延到后续场次 */
+  postponed?: {
+    fromSessionId: string;
+    toSessionId: string;
+    at: string;
+    closureId: string;
+  };
+  /** 顺延通知机构账号 id（如适用） */
+  institutionNotifiedUserIds?: string[];
 }
 
 /** 实时看板（救生员端 + 运营） */
@@ -580,11 +637,21 @@ export interface PoolStatusReq {
   status: PoolStatus;
   reason?: string;
   cause?: IncidentType | 'other';
+  /** 处置方式（水质异常闭池）：闭池 / 部分开放 / 延期 */
+  disposition?: ClosureDisposition;
+  /** 受影响泳区（部分开放时为暂停使用的泳区；闭池可留空=全部） */
+  affectedZoneIds?: ZoneId[];
+  /** 计划复测时间 ISO */
+  retestPlannedAt?: string;
+  /** 延期目标场次 id（disposition=postponed 时必填） */
+  postponeToSessionId?: string;
   /** 闭池时联动：退费、发补偿券、复测、清场巡查、居民通知 */
   refund?: boolean;
   compVoucher?: boolean;
   notifyResidents?: boolean;
   requireWaterRetest?: boolean;
+  /** 已入场人群补偿券（区别于未入场全额退） */
+  checkedInVoucher?: boolean;
 }
 
 export interface WorkTaskReq {

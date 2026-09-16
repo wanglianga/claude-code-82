@@ -159,8 +159,8 @@ export function seed(): DB {
   ];
 
   const lessons: CoachingLesson[] = [
-    { id: 'ls-1', coachName: '马教练', title: '自由泳提高班', sessionId: 's-mid', zoneId: 'training', lane: 1, capacity: 8, enrolled: 5, price: 120, studentIds: [] },
-    { id: 'ls-2', coachName: '林教练', title: '少儿启蒙班', sessionId: 's-eve', zoneId: 'family', lane: 0, capacity: 6, enrolled: 6, price: 150, studentIds: [] },
+    { id: 'ls-1', coachName: '马教练', title: '自由泳提高班', sessionId: 's-mid', zoneId: 'training', lane: 1, capacity: 8, enrolled: 5, price: 120, studentIds: ['u-zhang'] },
+    { id: 'ls-2', coachName: '林教练', title: '少儿启蒙班', sessionId: 's-eve', zoneId: 'family', lane: 0, capacity: 6, enrolled: 6, price: 150, studentIds: ['u-li'] },
   ];
 
   return {

@@ -2,6 +2,7 @@ import type {
   DB, Booking, BookingKind, MemberTier, Incident, IncidentTask, IncidentType,
   Notification, Role, Session, WaterReading, Zone, ZoneId, WorkTask, PatrolIssue,
   LiveBoard, ZoneLiveStat, GuardPost, PoolStatus, ClosureRecord, ClosureAffectedItem,
+  AffectedGroup, ClosureLessonPostpone,
 } from '../shared/types.js';
 import { GUARD_POST_LABEL } from '../shared/types.js';
 import { WATER_STD, evaluateWater, priceOf } from '../shared/logic.js';
@@ -213,6 +214,8 @@ export function createBooking(db: DB, userId: string, req: {
   const session = db.sessions.find((s) => s.id === req.sessionId);
   if (!session) throw new HttpError(404, '场次不存在');
   if (session.poolStatus === 'closed') throw new HttpError(409, '该场次已闭池，暂不可预约');
+  if (session.poolStatus === 'partial' && (session.affectedZoneIds ?? []).includes(req.zoneId))
+    throw new HttpError(409, `该泳区因${session.statusReason || '水质异常'}暂停开放，请选择其他泳区或场次`);
   const zone = db.zones.find((z) => z.id === req.zoneId);
   if (!zone) throw new HttpError(404, '泳区不存在');
   if (!req.healthPledge) throw new HttpError(400, '必须勾选健康承诺后方可预约');
@@ -329,6 +332,8 @@ export function checkIn(db: DB, bookingId: string, operator: string, req: {
   const session = db.sessions.find((s) => s.id === b.sessionId)!;
   if (session.poolStatus === 'closed') throw new HttpError(409, '本场已闭池，停止入场');
   if (session.poolStatus === 'restricted') throw new HttpError(409, `本场限流中：${session.statusReason || '水质/天气异常待复测'}，暂不放行`);
+  if (session.poolStatus === 'partial' && (session.affectedZoneIds ?? []).includes(b.zoneId))
+    throw new HttpError(409, `该泳区因${session.statusReason || '水质异常'}暂停开放，请为泳客改约其他泳区或办理退款`);
   if (req.healthCode !== 'green') throw new HttpError(400, '健康码非绿码/已过期，请引导居民更新后再核验');
 
   const user = db.users.find((u) => u.id === b.userId)!;
@@ -456,15 +461,23 @@ export function addPatrolIssue(db: DB, reporter: string, req: {
 export function changePoolStatus(db: DB, operator: string, req: {
   sessionId: string; status: PoolStatus; reason?: string; cause?: IncidentType | 'other';
   refund?: boolean; compVoucher?: boolean; notifyResidents?: boolean; requireWaterRetest?: boolean;
+  disposition?: 'closed' | 'partial' | 'postponed';
+  affectedZoneIds?: ZoneId[];
+  retestPlannedAt?: string;
+  postponeToSessionId?: string;
+  checkedInVoucher?: boolean;
 }) {
   const session = db.sessions.find((s) => s.id === req.sessionId);
   if (!session) throw new HttpError(404, '场次不存在');
   const prev = session.poolStatus;
   session.closureIds = session.closureIds ?? [];
 
+  // 部分开放 / 延期都属于“处置”，默认落为闭池类处置方式
+  const disposition = req.disposition ?? 'closed';
+
   // ---------- 恢复开放：以“当前生效闭池档案”为唯一门禁依据，历史档案不可变 ----------
   if (req.status === 'normal') {
-    if (prev !== 'closed' && prev !== 'restricted') return { session, reopened: false as const };
+    if (prev !== 'closed' && prev !== 'restricted' && prev !== 'partial') return { session, reopened: false as const };
     const active = session.activeClosureId
       ? db.closureRecords.find((r) => r.id === session.activeClosureId)
       : undefined;
@@ -497,13 +510,15 @@ export function changePoolStatus(db: DB, operator: string, req: {
       );
     }
 
+    // 门禁按处置方式区分：部分开放/延期无需全场清场（清场工单可能未生成或非必需）
+    const needCleaning = active.disposition === 'closed';
     // 任一门禁未完成：拒绝恢复，且不改动场次状态、不发送恢复通知、不改动档案与退费补偿
     const missing: string[] = [];
-    if (!cleaning.ok) missing.push(`清场清洁未完成（${cleaning.reason}）`);
+    if (needCleaning && !cleaning.ok) missing.push(`清场清洁未完成（${cleaning.reason}）`);
     if (!disinfection.ok) missing.push(`消毒复测未完成（${disinfection.reason}）`);
     if (active.requireWaterRetest && !retestReading) missing.push('尚无晚于本轮闭池时间的达标水质复测读数');
     if (missing.length) {
-      throw new HttpError(409, `本轮闭池处置尚未完成，不能恢复开放：${missing.join('；')}。恢复开放必须以本轮闭池事件为唯一依据，清场、消毒复测与必要的达标水质全部完成后方可放行。`);
+      throw new HttpError(409, `本轮处置尚未完成，不能恢复开放：${missing.join('；')}。恢复开放必须以本轮处置事件为唯一依据，消毒复测与必要的达标水质全部完成后方可放行。`);
     }
 
     const at = now();
@@ -512,6 +527,8 @@ export function changePoolStatus(db: DB, operator: string, req: {
     session.reopenedAt = at;
     session.requireWaterRetest = false;
     session.activeClosureId = undefined;
+    session.affectedZoneIds = undefined;
+    session.retestPlannedAt = undefined;
 
     // 回写本轮档案（仅回写恢复结果；闭池原因/退费/补偿等历史字段不变）
     active.status = 'reopened';
@@ -565,26 +582,59 @@ export function changePoolStatus(db: DB, operator: string, req: {
     return { session, reopened: false as const };
   }
 
-  // ---------- 闭池：生成一份新的不可变档案 ----------
-  if (prev === 'closed') throw new HttpError(409, '该场次已处于闭池状态，请先恢复开放后再发起新一轮闭池');
+  // ---------- 生成一份新的不可变处置档案（闭池 / 部分开放 / 延期） ----------
+  if (prev === 'closed' || prev === 'partial') throw new HttpError(409, '该场次已处于处置状态，请先恢复开放后再发起新一轮处置');
+
+  // 延期必须指定目标场次
+  let postponeTarget: Session | undefined;
+  if (disposition === 'postponed') {
+    if (!req.postponeToSessionId) throw new HttpError(400, '延期处置必须选择顺延目标场次');
+    postponeTarget = db.sessions.find((s) => s.id === req.postponeToSessionId);
+    if (!postponeTarget) throw new HttpError(404, '顺延目标场次不存在');
+    if (postponeTarget.id === session.id) throw new HttpError(400, '不能顺延到当前场次');
+  }
 
   const at = now();
-  const reason = req.reason || '临时闭池';
+  const reason = req.reason || (disposition === 'postponed' ? '场次延期' : '临时闭池');
   const waterCause = req.cause === 'water_abnormal' || /水质|余氯|浊度|水温/.test(reason);
   const requireRetest = req.requireWaterRetest ?? waterCause;
   const seq = (session.closureIds?.length ?? 0) + 1;
   const closureId = nextId('closure');
 
-  session.poolStatus = 'closed';
+  // 受影响泳区：闭池=全部；部分开放=指定；延期=全部
+  const allZoneIds = db.zones.map((z) => z.id);
+  const affectedZoneIds: ZoneId[] = disposition === 'partial'
+    ? (req.affectedZoneIds ?? [])
+    : allZoneIds;
+  if (disposition === 'partial' && affectedZoneIds.length === 0)
+    throw new HttpError(400, '部分开放必须选择至少一个暂停使用的泳区');
+  const zoneAffected = (zoneId: ZoneId) => affectedZoneIds.includes(zoneId);
+
+  // 场次状态：部分开放=partial；闭池/延期=closed（延期对现场等同于暂停当前场）
+  const poolStatus: PoolStatus = disposition === 'partial' ? 'partial' : 'closed';
+  session.poolStatus = poolStatus;
   session.statusReason = reason;
-  session.closedAt = at;
+  if (poolStatus === 'closed') session.closedAt = at;
   session.settled = true;
   session.requireWaterRetest = requireRetest;
   session.activeClosureId = closureId;
   session.reopenedAt = undefined;
+  session.affectedZoneIds = affectedZoneIds;
+  session.retestPlannedAt = req.retestPlannedAt;
 
+  // 课程/预约自动顺延目标：优先同日后续且未闭池的场次，其次任意其他场
+  const autoTarget = (): Session | undefined =>
+    db.sessions
+      .filter((s) => s.id !== session.id && s.poolStatus !== 'closed' && s.poolStatus !== 'partial'
+        && s.date === session.date && s.start >= session.start)
+      .sort((a, b) => a.start.localeCompare(b.start))[0]
+    ?? db.sessions.find((s) => s.id !== session.id);
+
+  // 受影响预约：仅统计受影响泳区内的有效预约（部分开放时其余泳区预约不受影响、可正常核验）
   const affectedBookings = db.bookings.filter(
-    (b) => b.sessionId === session.id && (b.status === 'booked' || b.status === 'checked_in'),
+    (b) => b.sessionId === session.id
+      && (b.status === 'booked' || b.status === 'checked_in')
+      && zoneAffected(b.zoneId),
   );
 
   const affected: ClosureAffectedItem[] = [];
@@ -597,10 +647,11 @@ export function changePoolStatus(db: DB, operator: string, req: {
   let originalVoucherReturnCount = 0;
   let extraVoucherCount = 0;
   let processedCount = 0;
+  const groupCounts: Record<AffectedGroup, number> = { checked_in: 0, not_checked_in: 0, coaching: 0 };
 
   const pushN = (n: Omit<Notification, 'id' | 'at'>) => {
     db.notifications.unshift({ ...n, id: nextId('nt'), at: now() });
-    if (db.notifications.length > 300) db.notifications.length = 300;
+    if (db.notifications.length > 400) db.notifications.length = 400;
     notificationIds.push(db.notifications[0].id);
     return db.notifications[0];
   };
@@ -608,128 +659,212 @@ export function changePoolStatus(db: DB, operator: string, req: {
   /** 逐居民聚合通知文案（一人多笔只发一条个人通知） */
   const perUser = new Map<string, { texts: string[]; extra: boolean }>();
 
+  // 教练课：判定一笔预约是否为教练课（kind=coaching）归入教练课组；普通泳道预约即使本人是学员也按已入场/未入场处理
+  const isCoachingBooking = (b: Booking) => b.kind === 'coaching';
+  // 本场课程（用于课程顺延与学员/机构通知，独立于预约分组）
+  const lessonsInSession = db.lessons.filter((l) => l.sessionId === session.id);
+
   for (const b of affectedBookings) {
     const u = db.users.find((x) => x.id === b.userId);
     if (!u) continue;
+    const coaching = isCoachingBooking(b);
+    const group: AffectedGroup = coaching ? 'coaching'
+      : b.status === 'checked_in' ? 'checked_in' : 'not_checked_in';
+    groupCounts[group]++;
     const item: ClosureAffectedItem = {
       bookingId: b.id, bookingCode: b.code, userId: u.id, userName: u.name,
       paidAmount: b.paidAmount, paymentMethod: b.paymentMethod, refunded: false,
       refund: null, extraCompVoucher: false, voucherGranted: false,
+      group, inAffectedZone: true,
     };
 
-    // 退款文案（按渠道准确表达，绝不再统一宣称“退回账户”）
-    let refundText = '';
+    let actionText = '';
 
-    if (req.refund) {
-      processedCount++;
-      item.refunded = true;
-      if (b.paymentMethod === 'wallet' && b.paidAmount > 0) {
-        // 储值支付：仅退回储值余额
-        u.walletBalance = (u.walletBalance ?? 0) + b.paidAmount;
-        const tx = {
-          id: nextId('tx'), at: now(), userId: u.id, amount: b.paidAmount,
-          reason: `第${toZh(seq)}轮闭池原路退储值 ${b.code}（${reason}）`,
-          sessionId: session.id, closureId,
-        };
-        db.walletTxns.unshift(tx);
-        walletRefundTotal += b.paidAmount;
-        walletRefundCount++;
-        item.refund = { channel: 'wallet', refunded: true, amount: b.paidAmount, walletTxnId: tx.id };
-        refundText = `${b.paidAmount} 元已原路退回您的储值余额`;
-      } else if (b.paymentMethod === 'voucher') {
-        // 补偿券支付：只恢复原券，不产生任何金额流水
-        u.compVouchers = (u.compVouchers ?? 0) + 1;
-        originalVoucherReturnCount++;
-        item.refund = { channel: 'voucher', originalVoucherReturned: true, returnedCount: 1 };
-        refundText = '原预约使用的 1 张补偿券已返还至您的账户';
-      } else if (b.paymentMethod === 'cash' && b.paidAmount > 0) {
-        // 现场支付：不进储值，登记现场退款处理
-        cashRefundTotal += b.paidAmount;
-        cashRefundCount++;
-        const note = `凭预约码 ${b.code} 到前台办理现场退款 ${b.paidAmount} 元（原路为现场支付，不退入储值）`;
-        item.refund = { channel: 'cash', registered: true, amount: b.paidAmount, note };
-        refundText = note;
-      } else if (b.paidAmount === 0) {
-        // 公益免费场：无退款动作
-        item.refund = { channel: 'cash', registered: false, amount: 0, note: '公益免费预约，无需退款' };
-        refundText = '本场为公益免费预约，无需退款';
+    // ---- 教练课人群：受影响泳区的课程一律顺延（部分开放/闭池/延期），不退费 ----
+    if (group === 'coaching') {
+      const target = postponeTarget ?? autoTarget();
+      if (target) {
+        b.status = 'postponed';
+        b.postponedFromSessionId = session.id;
+        b.postponeToSessionId = target.id;
+        item.postponed = true;
+        item.postponeToSessionId = target.id;
+        actionText = `教练课顺延至「${target.label}」，费用保留不作退款`;
+      } else {
+        actionText = '教练课顺延安排将另行通知';
       }
-    }
-
-    // 额外补偿券：与“原券返还”严格分开
-    let extraText = '';
-    if (req.compVoucher) {
-      u.compVouchers = (u.compVouchers ?? 0) + 1;
-      extraVoucherCount++;
-      item.extraCompVoucher = true;
-      item.voucherGranted = true;
-      b.status = 'compensated';
-      extraText = '另额外发放 1 张补偿券（可抵一次入场，与原支付返还分开）';
-    } else if (req.refund) {
-      b.status = 'refunded';
+    } else if (disposition === 'postponed') {
+      // ---- 延期：未入场预约顺延，不退费 ----
+      const target = postponeTarget!;
+      b.status = 'postponed';
+      b.postponedFromSessionId = session.id;
+      b.postponeToSessionId = target.id;
+      item.postponed = true;
+      item.postponeToSessionId = target.id;
+      actionText = `预约顺延至「${target.label}」，费用保留`;
+    } else if (group === 'checked_in') {
+      // ---- 已入场强制清场：不退现金（服务已部分使用），按实际影响发安抚券 ----
+      if (req.checkedInVoucher !== false) {
+        u.compVouchers = (u.compVouchers ?? 0) + 1;
+        extraVoucherCount++;
+        item.extraCompVoucher = true;
+        item.voucherGranted = true;
+        item.refund = null;
+        b.status = 'compensated';
+        actionText = '您已入场，现场提前清场，发放 1 张安抚补偿券（不退现金）';
+      } else {
+        b.status = 'refunded';
+        actionText = '您已入场，现场提前清场，已登记现场处置（不退款）';
+      }
+    } else {
+      // ---- 未入场：原路全额退款 + 可选补偿券 ----
+      let refundText = '';
+      if (req.refund) {
+        processedCount++;
+        item.refunded = true;
+        if (b.paymentMethod === 'wallet' && b.paidAmount > 0) {
+          u.walletBalance = (u.walletBalance ?? 0) + b.paidAmount;
+          const tx = {
+            id: nextId('tx'), at: now(), userId: u.id, amount: b.paidAmount,
+            reason: `第${toZh(seq)}轮处置原路退储值 ${b.code}（${reason}）`,
+            sessionId: session.id, closureId,
+          };
+          db.walletTxns.unshift(tx);
+          walletRefundTotal += b.paidAmount;
+          walletRefundCount++;
+          item.refund = { channel: 'wallet', refunded: true, amount: b.paidAmount, walletTxnId: tx.id };
+          refundText = `${b.paidAmount} 元已原路退回您的储值余额`;
+        } else if (b.paymentMethod === 'voucher') {
+          u.compVouchers = (u.compVouchers ?? 0) + 1;
+          originalVoucherReturnCount++;
+          item.refund = { channel: 'voucher', originalVoucherReturned: true, returnedCount: 1 };
+          refundText = '原预约使用的 1 张补偿券已返还至您的账户';
+        } else if (b.paymentMethod === 'cash' && b.paidAmount > 0) {
+          cashRefundTotal += b.paidAmount;
+          cashRefundCount++;
+          const note = `凭预约码 ${b.code} 到前台办理现场退款 ${b.paidAmount} 元（原路为现场支付，不退入储值）`;
+          item.refund = { channel: 'cash', registered: true, amount: b.paidAmount, note };
+          refundText = note;
+        } else if (b.paidAmount === 0) {
+          item.refund = { channel: 'cash', registered: false, amount: 0, note: '公益免费预约，无需退款' };
+          refundText = '本场为公益免费预约，无需退款';
+        }
+      }
+      let extraText = '';
+      if (req.compVoucher) {
+        u.compVouchers = (u.compVouchers ?? 0) + 1;
+        extraVoucherCount++;
+        item.extraCompVoucher = true;
+        item.voucherGranted = true;
+        b.status = 'compensated';
+        extraText = '另额外发放 1 张补偿券（可抵一次入场，与原支付返还分开）';
+      } else if (req.refund) {
+        b.status = 'refunded';
+      }
+      actionText = [refundText, extraText].filter(Boolean).join('；');
     }
     b.closureIds = [...(b.closureIds ?? []), closureId];
 
     if (req.notifyResidents) {
-      // 收集该居民本笔预约的退款/补偿文案，循环后合并成一条个人通知
-      const lines: string[] = [];
-      if (req.refund && refundText) lines.push(refundText);
-      if (req.compVoucher && extraText) lines.push(extraText);
       const agg = perUser.get(u.id) ?? { texts: [], extra: false };
-      agg.texts.push(`${b.code}：${lines.join('；') || '预约已取消'}`);
-      if (req.compVoucher) agg.extra = true;
+      agg.texts.push(`${b.code}：${actionText || '预约已取消'}`);
+      if (item.extraCompVoucher) agg.extra = true;
       perUser.set(u.id, agg);
     }
     affected.push(item);
   }
 
-  // 每位受影响居民只发一条合并的个人通知（避免同一人多笔预约收到重复闭池通知）
+  // ---- 教练课顺延：更新课程场次、通知学员与机构 ----
+  const lessonPostponements: ClosureLessonPostpone[] = [];
+  const lessonsToMove = lessonsInSession.filter((l) => zoneAffected(l.zoneId));
+  for (const lesson of lessonsToMove) {
+    const target = disposition === 'postponed' ? postponeTarget : autoTarget();
+    if (!target) continue;
+    lesson.sessionId = target.id;
+    lesson.postponed = { fromSessionId: session.id, toSessionId: target.id, at, closureId };
+    // 学员通知（教练课人群）
+    for (const stuId of lesson.studentIds) {
+      if (req.notifyResidents) {
+        pushN({
+          title: `教练课顺延通知：${lesson.title}`, level: 'warning', roles: [], userId: stuId,
+          sessionId: target.id, closureId,
+          body: `因「${session.label}」${reason}，${lesson.coachName}的《${lesson.title}》顺延至「${target.label}」，费用保留，请按时到场。`,
+        });
+      }
+    }
+    // 机构通知：培训机构账号或教练（演示中机构账号 u-lan）
+    const institution = db.users.find((u) => u.memberTier === 'institution');
+    let notifId: string | undefined;
+    if (institution && req.notifyResidents) {
+      const n = pushN({
+        title: `机构通知：教练课顺延（${lesson.title}）`, level: 'warning', roles: [],
+        userId: institution.id, sessionId: target.id, closureId,
+        body: `贵机构/团队相关课程《${lesson.title}》因${reason}由「${session.label}」顺延至「${target.label}」，涉及学员 ${lesson.studentIds.length} 人，请协调教练与场地。`,
+      });
+      notifId = n.id;
+      lesson.institutionNotifiedUserIds = [...(lesson.institutionNotifiedUserIds ?? []), institution.id];
+    }
+    lessonPostponements.push({
+      lessonId: lesson.id, lessonTitle: lesson.title, coachName: lesson.coachName,
+      fromSessionId: session.id, toSessionId: target.id, studentCount: lesson.studentIds.length,
+      institutionNotified: !!notifId, notificationId: notifId,
+    });
+  }
+
+  // 每位受影响居民只发一条合并的个人通知（区分已入场/未入场/教练课口径）
+  const dispositionLabel = disposition === 'partial' ? '部分泳区暂停开放'
+    : disposition === 'postponed' ? '场次延期' : '闭池';
   for (const [uid, agg] of perUser) {
     const n = pushN({
-      title: `闭池通知（第${toZh(seq)}轮）：${session.label} 已按原渠道退款${agg.extra ? '并发放额外补偿券' : ''}`,
-      body: `闭池原因：${reason}。您的受影响预约：${agg.texts.join('；')}。恢复开放时间将另行通知。`,
+      title: `${dispositionLabel}通知（第${toZh(seq)}轮）：${session.label}`,
+      body: `原因：${reason}。您的受影响预约：${agg.texts.join('；')}。${req.retestPlannedAt ? `计划复测时间 ${fmtClock(req.retestPlannedAt)}。` : ''}后续安排请以通知为准。`,
       level: 'critical', roles: [], userId: uid, sessionId: session.id, closureId,
     });
-    // 回写到该居民本轮的全部受影响条目
     for (const a of affected) if (a.userId === uid) a.notificationId = n.id;
   }
 
   if (req.notifyResidents) {
     pushN({
-      title: `【闭池·第${toZh(seq)}轮】${session.label}`, level: 'critical', roles: [],
-      body: `${reason}。储值退款 ${walletRefundCount} 笔、原券返还 ${originalVoucherReturnCount} 张、现场退款登记 ${cashRefundCount} 笔${req.compVoucher ? `、额外补偿券 ${extraVoucherCount} 张` : ''}，开放时间另行通知。`,
+      title: `【${dispositionLabel}·第${toZh(seq)}轮】${session.label}`, level: 'critical', roles: [],
+      body: `${reason}。受影响泳区 ${affectedZoneIds.length}/${allZoneIds.length} 个；储值退款 ${walletRefundCount} 笔、原券返还 ${originalVoucherReturnCount} 张、现场退款登记 ${cashRefundCount} 笔、补偿/安抚券 ${extraVoucherCount} 张、教练课顺延 ${lessonPostponements.length} 节。`,
       sessionId: session.id, closureId,
     });
   }
 
-  // 救生巡查同步：在岗救生员结束当前站位（清场），记录关联本轮档案
+  // 救生巡查同步：完全闭池撤全部在岗救生员；部分开放只撤受影响泳区对应岗（简化：记录清场人数但保留其他岗）
   let guardReliefCount = 0;
   for (const d of db.guardDuties) {
     if (d.sessionId === session.id && !d.end) {
-      d.end = now();
-      d.note = `第${toZh(seq)}轮闭池清场：${reason}`;
-      guardReliefCount++;
+      if (disposition === 'closed' || disposition === 'postponed') {
+        d.end = now();
+        d.note = `第${toZh(seq)}轮${dispositionLabel}清场：${reason}`;
+        guardReliefCount++;
+      }
     }
   }
 
-  // 维修：复测/消毒；保洁：清场清洁（均引用本轮闭池档案）
+  // 工单：完全闭池生成消毒复测+清场清洁；部分开放/延期只生成受影响泳区消毒复测
   const taskIds: string[] = [];
   const disinfection: WorkTask = {
     id: nextId('wt'), sessionId: session.id, kind: 'disinfection',
-    title: `第${toZh(seq)}轮闭池后全面消毒与水质复测`,
-    detail: `闭池原因：${reason}。恢复开放前须提交达标水质读数。`,
+    title: `第${toZh(seq)}轮${dispositionLabel}后消毒与水质复测`,
+    detail: `原因：${reason}。受影响泳区：${affectedZoneIds.join('、') || '全部'}。恢复开放前须提交达标水质读数。`,
     zoneId: 'all', assigneeRole: 'maintenance', status: 'pending',
     createdAt: now(), source: 'closure', closureId,
   };
-  const cleaning: WorkTask = {
-    id: nextId('wt'), sessionId: session.id, kind: 'cleaning',
-    title: `第${toZh(seq)}轮闭池清场清洁`,
-    detail: '清场后清洁池岸、淋浴区、更衣室，检查遗落物品。',
-    zoneId: 'all', assigneeRole: 'cleaner', status: 'pending',
-    createdAt: now(), source: 'closure', closureId,
-  };
-  db.workTasks.unshift(disinfection, cleaning);
-  taskIds.push(disinfection.id, cleaning.id);
+  db.workTasks.unshift(disinfection);
+  taskIds.push(disinfection.id);
+  if (disposition === 'closed' || disposition === 'postponed') {
+    const cleaning: WorkTask = {
+      id: nextId('wt'), sessionId: session.id, kind: 'cleaning',
+      title: `第${toZh(seq)}轮${dispositionLabel}清场清洁`,
+      detail: '清场后清洁池岸、淋浴区、更衣室，检查遗落物品。',
+      zoneId: 'all', assigneeRole: 'cleaner', status: 'pending',
+      createdAt: now(), source: 'closure', closureId,
+    };
+    db.workTasks.unshift(cleaning);
+    taskIds.push(cleaning.id);
+  }
 
   // 关联事件追加联动记录
   const incidentIds: string[] = [];
@@ -738,17 +873,20 @@ export function changePoolStatus(db: DB, operator: string, req: {
     if (inc) {
       inc.actions.push({
         id: nextId('ia'), at: now(), by: operator, byRole: 'ops',
-        content: `第${toZh(seq)}轮闭池联动已执行：储值退款 ${walletRefundCount} 笔、原券返还 ${originalVoucherReturnCount} 张、现场退款登记 ${cashRefundCount} 笔、额外补偿券 ${extraVoucherCount} 张、复测与清场工单已派发、居民通知已发送。`,
+        content: `第${toZh(seq)}轮${dispositionLabel}联动：储值退款 ${walletRefundCount} 笔、原券返还 ${originalVoucherReturnCount} 张、现场退款 ${cashRefundCount} 笔、补偿券 ${extraVoucherCount} 张、课程顺延 ${lessonPostponements.length} 节、复测计划 ${req.retestPlannedAt ? fmtClock(req.retestPlannedAt) : '待定'}。`,
       });
       incidentIds.push(inc.id);
     }
   }
 
-  // ---------- 固化不可变闭池档案 ----------
+  // ---------- 固化不可变处置档案 ----------
   const record: ClosureRecord = {
     id: closureId, seq, sessionId: session.id, sessionLabel: session.label,
     cause: req.cause ?? 'other', reason, closedAt: at, closedBy: operator,
-    status: 'closed', requireWaterRetest: requireRetest,
+    status: 'closed', disposition, affectedZoneIds,
+    retestPlannedAt: req.retestPlannedAt,
+    postponeToSessionId: disposition === 'postponed' ? postponeTarget?.id : undefined,
+    requireWaterRetest: requireRetest,
     options: { refund: !!req.refund, compVoucher: !!req.compVoucher, notifyResidents: !!req.notifyResidents },
     affected,
     walletRefundTotal, walletRefundCount,
@@ -756,13 +894,14 @@ export function changePoolStatus(db: DB, operator: string, req: {
     originalVoucherReturnCount, extraVoucherCount,
     refundCount: processedCount,
     announcementIds: notificationIds, guardReliefCount, taskIds, incidentIds,
+    lessonPostponements, groupCounts,
   };
   db.closureRecords.unshift(record);
   session.closureIds.push(closureId);
 
   pushN({
-    title: `闭池处置完成（第${toZh(seq)}轮）：${session.label}`, level: 'critical', roles: STAFF_ROLES,
-    body: `储值退款 ${walletRefundCount} 笔(¥${walletRefundTotal}) / 原券返还 ${originalVoucherReturnCount} 张 / 现场退款登记 ${cashRefundCount} 笔(¥${cashRefundTotal}) / 额外补偿券 ${extraVoucherCount} 张 / 复测与清场工单已派发 / 救生岗已撤。档案号 ${closureId}。`,
+    title: `${dispositionLabel}处置完成（第${toZh(seq)}轮）：${session.label}`, level: 'critical', roles: STAFF_ROLES,
+    body: `储值退款 ${walletRefundCount} 笔(¥${walletRefundTotal}) / 原券返还 ${originalVoucherReturnCount} 张 / 现场退款 ${cashRefundCount} 笔(¥${cashRefundTotal}) / 补偿安抚券 ${extraVoucherCount} 张 / 课程顺延 ${lessonPostponements.length} 节 / 已入场 ${groupCounts.checked_in}、未入场 ${groupCounts.not_checked_in}、教练课 ${groupCounts.coaching}。档案号 ${closureId}。`,
     sessionId: session.id, closureId,
   });
 
@@ -771,8 +910,14 @@ export function changePoolStatus(db: DB, operator: string, req: {
     walletRefundTotal, walletRefundCount,
     cashRefundTotal, cashRefundCount,
     originalVoucherReturnCount, extraVoucherCount,
+    lessonPostponed: lessonPostponements.length,
     affected: affected.length, reopened: false as const,
   };
+}
+
+function fmtClock(iso: string) {
+  const d = new Date(iso);
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 }
 
 function toZh(n: number) {

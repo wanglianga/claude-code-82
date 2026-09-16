@@ -150,7 +150,7 @@ const bClosed = st.bookings.find(b => b.id === bookingId);
 check('预约状态变为退费+补偿', bClosed.status === 'compensated', bClosed.status);
 check('居民收到个人闭池通知', st.notifications.some(n => n.userId === liAfterClose.id && n.title.includes('闭池通知')));
 check('救生岗闭池撤哨', st.guardDuties.filter(d => d.sessionId === 's-mid' && !d.end).length === 0);
-check('生成闭池复测+清场工单', st.workTasks.some(t => t.sessionId === 's-mid' && t.title.includes('闭池后全面消毒')) && st.workTasks.some(t => t.sessionId === 's-mid' && t.title.includes('闭池清场')));
+check('生成闭池复测+清场工单', st.workTasks.some(t => t.sessionId === 's-mid' && t.closureId && t.kind === 'disinfection') && st.workTasks.some(t => t.sessionId === 's-mid' && t.closureId && t.kind === 'cleaning'));
 
 // ---------- 8. 恢复门禁：清场清洁 + 消毒复测工单 + 必要达标水质，三者齐备方可恢复 ----------
 console.log('⑧ 恢复开放门禁：处置未完成一律拒绝 → 三项齐备后恢复');

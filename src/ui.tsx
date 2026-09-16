@@ -11,20 +11,21 @@ export const BOOKING_STATUS_LABEL: Record<BookingStatus, string> = {
   cancelled: '已取消',
   refunded: '已退费',
   compensated: '退费+补偿',
+  postponed: '已顺延',
 };
 
 export type Tone = 'ok' | 'warn' | 'danger' | 'info' | 'purple' | 'gray';
 
 export const BOOKING_STATUS_BADGE: Record<BookingStatus, Tone> = {
   booked: 'info', checked_in: 'ok', no_show: 'gray', cancelled: 'gray',
-  refunded: 'purple', compensated: 'purple',
+  refunded: 'purple', compensated: 'purple', postponed: 'warn',
 };
 
 export const POOL_STATUS_LABEL: Record<PoolStatus, string> = {
-  normal: '正常开放', restricted: '限流通告', closed: '已闭池',
+  normal: '正常开放', restricted: '限流通告', partial: '部分开放', closed: '已闭池',
 };
 export const POOL_STATUS_BADGE: Record<PoolStatus, Tone> = {
-  normal: 'ok', restricted: 'warn', closed: 'danger',
+  normal: 'ok', restricted: 'warn', partial: 'warn', closed: 'danger',
 };
 
 export const KIND_LABEL: Record<BookingKind, string> = {

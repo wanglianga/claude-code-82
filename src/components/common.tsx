@@ -60,8 +60,9 @@ export function LifecycleSteps({ session, stage }: { session: Session; stage: 'b
   );
 }
 
-export function PoolStatusBanner({ status, reason, requireRetest, closedAt, reopenedAt }: {
+export function PoolStatusBanner({ status, reason, requireRetest, closedAt, reopenedAt, affectedZoneNames, retestPlannedAt }: {
   status: PoolStatus; reason?: string; requireRetest?: boolean; closedAt?: string; reopenedAt?: string;
+  affectedZoneNames?: string[]; retestPlannedAt?: string;
 }) {
   if (status === 'normal') {
     return reopenedAt
@@ -70,10 +71,19 @@ export function PoolStatusBanner({ status, reason, requireRetest, closedAt, reop
   }
   if (status === 'restricted')
     return <div className="alert warn">⚠️ 限流通告：{reason || '现场异常'}。新入场已暂停，在池泳客岸上观察；{requireRetest ? '维修处置后须复测达标。' : ''}</div>;
+  if (status === 'partial')
+    return (
+      <div className="alert warn">
+        🔶 部分开放：{reason || '部分泳区水质异常'}
+        {affectedZoneNames?.length ? <div style={{ marginTop: 4 }}>暂停使用泳区：<b>{affectedZoneNames.join('、')}</b>；其余泳区正常核验入场。</div> : null}
+        {retestPlannedAt && <div className="small" style={{ marginTop: 4 }}>计划复测时间：{new Date(retestPlannedAt).toLocaleString('zh-CN', { hour12: false })}</div>}
+      </div>
+    );
   return (
     <div className="alert danger">
       🚫 本场已闭池：{reason}
       {requireRetest && <div style={{ marginTop: 4 }}>恢复开放前置条件：维修完成消毒处置 + 救生员录入一次达标水质复测。</div>}
+      {retestPlannedAt && <div className="small" style={{ marginTop: 4 }}>计划复测时间：{new Date(retestPlannedAt).toLocaleString('zh-CN', { hour12: false })}</div>}
       {closedAt && <div className="small" style={{ marginTop: 4 }}>闭池时间 {new Date(closedAt).toLocaleString('zh-CN', { hour12: false })}</div>}
     </div>
   );

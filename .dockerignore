@@ -6,6 +6,7 @@ e2e-check.mjs
 privacy-check.mjs
 multi-closure-check.mjs
 payment-closure-check.mjs
+water-disposition-check.mjs
 *.log
 .git
 .gitignore

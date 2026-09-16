@@ -240,7 +240,9 @@ function MyBookings({ user, state }: Props) {
                   return (
                     <tr key={b.id}>
                       <td className="code-mono">{b.code}</td>
-                      <td>{s?.label}<div className="small muted">{z?.name}{b.lane ? ` · ${b.lane}号道` : ''}</div></td>
+                      <td>{s?.label}{b.status === 'postponed' && b.postponeToSessionId && (
+                        <div className="small" style={{ color: 'var(--warn)' }}>顺延至 {state.sessions.find((x) => x.id === b.postponeToSessionId)?.label}</div>
+                      )}<div className="small muted">{z?.name}{b.lane ? ` · ${b.lane}号道` : ''}</div></td>
                       <td>{KIND_LABEL[b.kind]}</td>
                       <td>{b.paidAmount === 0 ? '免费' : `¥${b.paidAmount}`}</td>
                       <td><Badge tone={BOOKING_STATUS_BADGE[b.status]}>{BOOKING_STATUS_LABEL[b.status]}</Badge></td>
@@ -300,7 +302,9 @@ function Lessons({ user, state }: Props) {
         return (
           <Card key={l.id} title={`${l.title} · ${l.coachName}`} extra={<Badge tone={full ? 'danger' : 'ok'}>{l.enrolled}/{l.capacity} 人</Badge>}>
             <dl className="kv">
-              <dt>时间场次</dt><dd>{s.label}</dd>
+              <dt>时间场次</dt><dd>{s.label}{l.postponed && (
+                <span className="badge warn" style={{ marginLeft: 6 }}>已自 {state.sessions.find((x) => x.id === l.postponed?.fromSessionId)?.label} 顺延</span>
+              )}</dd>
               <dt>地点</dt><dd>{z.name} · {l.lane > 0 ? `${l.lane} 号教学道` : '教学专区'}</dd>
               <dt>费用</dt><dd className="code-mono">¥{l.price} / 节（储值扣款）</dd>
             </dl>
