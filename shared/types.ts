@@ -99,6 +99,12 @@ export interface Booking {
   postponeToSessionId?: string;
   /** 顺延时记录原场次 */
   postponedFromSessionId?: string;
+  /** 原预约顺延到目标场次后，新生成预约的 id */
+  postponedBookingId?: string;
+  /** 目标场次新预约上的反向关联：由哪笔原预约迁移而来 */
+  migratedFromBookingId?: string;
+  /** 关联的闭池处置档案 id */
+  migratedClosureId?: string;
 }
 
 export type PoolStatus = 'normal' | 'restricted' | 'partial' | 'closed';
@@ -376,6 +382,8 @@ export interface ClosureAffectedItem {
   postponed?: boolean;
   /** 顺延后的场次 id */
   postponeToSessionId?: string;
+  /** 目标场次新生成的有效预约 id */
+  migratedBookingId?: string;
   /** 该居民收到的逐人通知 id */
   notificationId?: string;
 }
@@ -447,6 +455,10 @@ export interface ClosureRecord {
   lessonPostponements?: ClosureLessonPostpone[];
   /** 各人群分组计数（已入场/未入场/教练课） */
   groupCounts?: Record<AffectedGroup, number>;
+  /** 真实迁移到目标场次的预约笔数（目标场已生成可核验新预约） */
+  migratedBookingCount?: number;
+  /** 各目标场次迁入笔数 */
+  migrationSummary?: { sessionId: string; sessionLabel: string; count: number }[];
 }
 
 export interface ClosureLessonPostpone {

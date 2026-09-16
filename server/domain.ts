@@ -585,13 +585,15 @@ export function changePoolStatus(db: DB, operator: string, req: {
   // ---------- 生成一份新的不可变处置档案（闭池 / 部分开放 / 延期） ----------
   if (prev === 'closed' || prev === 'partial') throw new HttpError(409, '该场次已处于处置状态，请先恢复开放后再发起新一轮处置');
 
-  // 延期必须指定目标场次
+  // 延期必须指定目标场次；在修改任何状态前完成目标场开放状态与容量预检（失败则整体拒绝、不留死单）
   let postponeTarget: Session | undefined;
   if (disposition === 'postponed') {
     if (!req.postponeToSessionId) throw new HttpError(400, '延期处置必须选择顺延目标场次');
     postponeTarget = db.sessions.find((s) => s.id === req.postponeToSessionId);
     if (!postponeTarget) throw new HttpError(404, '顺延目标场次不存在');
     if (postponeTarget.id === session.id) throw new HttpError(400, '不能顺延到当前场次');
+    if (postponeTarget.poolStatus === 'closed' || postponeTarget.poolStatus === 'partial')
+      throw new HttpError(409, `顺延目标场次「${postponeTarget.label}」已闭池或部分开放，无法承接，请改选其他场次`);
   }
 
   const at = now();
@@ -612,23 +614,18 @@ export function changePoolStatus(db: DB, operator: string, req: {
 
   // 场次状态：部分开放=partial；闭池/延期=closed（延期对现场等同于暂停当前场）
   const poolStatus: PoolStatus = disposition === 'partial' ? 'partial' : 'closed';
-  session.poolStatus = poolStatus;
-  session.statusReason = reason;
-  if (poolStatus === 'closed') session.closedAt = at;
-  session.settled = true;
-  session.requireWaterRetest = requireRetest;
-  session.activeClosureId = closureId;
-  session.reopenedAt = undefined;
-  session.affectedZoneIds = affectedZoneIds;
-  session.retestPlannedAt = req.retestPlannedAt;
 
-  // 课程/预约自动顺延目标：优先同日后续且未闭池的场次，其次任意其他场
-  const autoTarget = (): Session | undefined =>
-    db.sessions
+  // 课程/预约自动顺延目标：优先同日后续且未闭池的场次，其次任意其他场（缓存保证课程与学员迁同一场）
+  let _autoTarget: Session | undefined | null = null;
+  const autoTarget = (): Session | undefined => {
+    if (_autoTarget !== null) return _autoTarget;
+    _autoTarget = db.sessions
       .filter((s) => s.id !== session.id && s.poolStatus !== 'closed' && s.poolStatus !== 'partial'
         && s.date === session.date && s.start >= session.start)
       .sort((a, b) => a.start.localeCompare(b.start))[0]
-    ?? db.sessions.find((s) => s.id !== session.id);
+      ?? db.sessions.find((s) => s.id !== session.id);
+    return _autoTarget;
+  };
 
   // 受影响预约：仅统计受影响泳区内的有效预约（部分开放时其余泳区预约不受影响、可正常核验）
   const affectedBookings = db.bookings.filter(
@@ -664,6 +661,66 @@ export function changePoolStatus(db: DB, operator: string, req: {
   // 本场课程（用于课程顺延与学员/机构通知，独立于预约分组）
   const lessonsInSession = db.lessons.filter((l) => l.sessionId === session.id);
 
+  // 延期：先预算目标场各泳区迁入人数（未入场普通预约 + 教练课预约），容量不足整体拒绝
+  if (disposition === 'postponed' && postponeTarget) {
+    const incoming = new Map<ZoneId, number>();
+    for (const b of affectedBookings) {
+      if (b.status === 'checked_in') continue; // 已入场人在现场，不迁移
+      incoming.set(b.zoneId, (incoming.get(b.zoneId) ?? 0) + Math.max(1, b.partySize));
+    }
+    for (const [zid, add] of incoming) {
+      const zone = db.zones.find((z) => z.id === zid)!;
+      const { seats: locked } = zoneLocked(db, postponeTarget, zid);
+      const { inPool, booked } = zoneCounts(db, postponeTarget.id, zid);
+      if (inPool + booked + locked + add > zone.capacity) {
+        throw new HttpError(409, `顺延目标场次「${postponeTarget.label}」的${zone.name}容量不足（现有在池 ${inPool}+待入 ${booked}+锁定 ${locked}+迁入 ${add} > 容量 ${zone.capacity}），请改选其他场次或改约泳区`);
+      }
+    }
+  }
+
+  // 所有前置校验通过后才修改当前场次状态（容量不足/目标关闭时上面已整体拒绝，原预约保持不变）
+  session.poolStatus = poolStatus;
+  session.statusReason = reason;
+  if (poolStatus === 'closed') session.closedAt = at;
+  session.settled = true;
+  session.requireWaterRetest = requireRetest;
+  session.activeClosureId = closureId;
+  session.reopenedAt = undefined;
+  session.affectedZoneIds = affectedZoneIds;
+  session.retestPlannedAt = req.retestPlannedAt;
+
+  /**
+   * 延期/部分开放时把预约真实迁移到目标场次：在目标场生成一笔 booked 新预约，
+   * 原预约标记 postponed 并双向关联；不退款、不二次扣款。返回新预约。
+   */
+  const migrateBooking = (b: Booking, target: Session): Booking => {
+    const id = nextId('bk');
+    const newBooking: Booking = {
+      ...b,
+      id,
+      code: `B-${db.counters.seq}`,
+      sessionId: target.id,
+      periodLabel: `${target.start}-${target.end}`,
+      status: 'booked',
+      lockerNo: undefined,
+      checkedInAt: undefined,
+      checkedInBy: undefined,
+      createdAt: now(),
+      closureIds: [closureId],
+      postponeToSessionId: undefined,
+      postponedFromSessionId: undefined,
+      postponedBookingId: undefined,
+      migratedFromBookingId: b.id,
+      migratedClosureId: closureId,
+    };
+    db.bookings.unshift(newBooking);
+    b.status = 'postponed';
+    b.postponedFromSessionId = session.id;
+    b.postponeToSessionId = target.id;
+    b.postponedBookingId = newBooking.id;
+    return newBooking;
+  };
+
   for (const b of affectedBookings) {
     const u = db.users.find((x) => x.id === b.userId);
     if (!u) continue;
@@ -684,26 +741,16 @@ export function changePoolStatus(db: DB, operator: string, req: {
     if (group === 'coaching') {
       const target = postponeTarget ?? autoTarget();
       if (target) {
-        b.status = 'postponed';
-        b.postponedFromSessionId = session.id;
-        b.postponeToSessionId = target.id;
+        const nb = migrateBooking(b, target);
         item.postponed = true;
         item.postponeToSessionId = target.id;
-        actionText = `教练课顺延至「${target.label}」，费用保留不作退款`;
+        item.migratedBookingId = nb.id;
+        actionText = `教练课顺延至「${target.label}」（新预约 ${nb.code} 可核验），费用保留不作退款`;
       } else {
         actionText = '教练课顺延安排将另行通知';
       }
-    } else if (disposition === 'postponed') {
-      // ---- 延期：未入场预约顺延，不退费 ----
-      const target = postponeTarget!;
-      b.status = 'postponed';
-      b.postponedFromSessionId = session.id;
-      b.postponeToSessionId = target.id;
-      item.postponed = true;
-      item.postponeToSessionId = target.id;
-      actionText = `预约顺延至「${target.label}」，费用保留`;
     } else if (group === 'checked_in') {
-      // ---- 已入场强制清场：不退现金（服务已部分使用），按实际影响发安抚券 ----
+      // ---- 已入场：人在现场，任何处置方式下都提前清场、发安抚券，不迁移 ----
       if (req.checkedInVoucher !== false) {
         u.compVouchers = (u.compVouchers ?? 0) + 1;
         extraVoucherCount++;
@@ -711,11 +758,21 @@ export function changePoolStatus(db: DB, operator: string, req: {
         item.voucherGranted = true;
         item.refund = null;
         b.status = 'compensated';
-        actionText = '您已入场，现场提前清场，发放 1 张安抚补偿券（不退现金）';
+        actionText = disposition === 'postponed'
+          ? '您已入场，场次延期现场提前清场，发放 1 张安抚补偿券（不退现金、不迁移）'
+          : '您已入场，现场提前清场，发放 1 张安抚补偿券（不退现金）';
       } else {
         b.status = 'refunded';
         actionText = '您已入场，现场提前清场，已登记现场处置（不退款）';
       }
+    } else if (disposition === 'postponed') {
+      // ---- 延期：未入场预约真实迁移到目标场次（生成可核验新预约），不退费 ----
+      const target = postponeTarget!;
+      const nb = migrateBooking(b, target);
+      item.postponed = true;
+      item.postponeToSessionId = target.id;
+      item.migratedBookingId = nb.id;
+      actionText = `预约顺延至「${target.label}」（新预约 ${nb.code} 可核验），费用保留`;
     } else {
       // ---- 未入场：原路全额退款 + 可选补偿券 ----
       let refundText = '';
@@ -880,6 +937,16 @@ export function changePoolStatus(db: DB, operator: string, req: {
   }
 
   // ---------- 固化不可变处置档案 ----------
+  const migrationMap = new Map<string, number>();
+  for (const a of affected) {
+    if (a.migratedBookingId && a.postponeToSessionId)
+      migrationMap.set(a.postponeToSessionId, (migrationMap.get(a.postponeToSessionId) ?? 0) + 1);
+  }
+  const migrationSummary = [...migrationMap.entries()].map(([sid, count]) => ({
+    sessionId: sid,
+    sessionLabel: db.sessions.find((s) => s.id === sid)?.label ?? sid,
+    count,
+  }));
   const record: ClosureRecord = {
     id: closureId, seq, sessionId: session.id, sessionLabel: session.label,
     cause: req.cause ?? 'other', reason, closedAt: at, closedBy: operator,
@@ -895,6 +962,8 @@ export function changePoolStatus(db: DB, operator: string, req: {
     refundCount: processedCount,
     announcementIds: notificationIds, guardReliefCount, taskIds, incidentIds,
     lessonPostponements, groupCounts,
+    migratedBookingCount: affected.filter((a) => a.migratedBookingId).length,
+    migrationSummary: migrationSummary,
   };
   db.closureRecords.unshift(record);
   session.closureIds.push(closureId);

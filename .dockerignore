@@ -7,6 +7,7 @@ privacy-check.mjs
 multi-closure-check.mjs
 payment-closure-check.mjs
 water-disposition-check.mjs
+postpone-migration-check.mjs
 *.log
 .git
 .gitignore

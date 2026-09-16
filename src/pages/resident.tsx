@@ -240,9 +240,15 @@ function MyBookings({ user, state }: Props) {
                   return (
                     <tr key={b.id}>
                       <td className="code-mono">{b.code}</td>
-                      <td>{s?.label}{b.status === 'postponed' && b.postponeToSessionId && (
-                        <div className="small" style={{ color: 'var(--warn)' }}>顺延至 {state.sessions.find((x) => x.id === b.postponeToSessionId)?.label}</div>
-                      )}<div className="small muted">{z?.name}{b.lane ? ` · ${b.lane}号道` : ''}</div></td>
+                      <td>{s?.label}{b.status === 'postponed' && b.postponeToSessionId && (() => {
+                        const nb = state.bookings.find((x) => x.id === b.postponedBookingId);
+                        return (
+                          <div className="small" style={{ color: 'var(--warn)' }}>
+                            顺延至 {state.sessions.find((x) => x.id === b.postponeToSessionId)?.label}
+                            {nb ? `（新预约 ${nb.code}，可正常核验）` : ''}
+                          </div>
+                        );
+                      })()}<div className="small muted">{z?.name}{b.lane ? ` · ${b.lane}号道` : ''}</div></td>
                       <td>{KIND_LABEL[b.kind]}</td>
                       <td>{b.paidAmount === 0 ? '免费' : `¥${b.paidAmount}`}</td>
                       <td><Badge tone={BOOKING_STATUS_BADGE[b.status]}>{BOOKING_STATUS_LABEL[b.status]}</Badge></td>
