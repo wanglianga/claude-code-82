@@ -301,8 +301,29 @@ function CloseReopen({ state, user }: Props) {
   const session = state.sessions.find((s) => s.id === sessionId)!;
   const affected = state.bookings.filter((b) => b.sessionId === sessionId && (b.status === 'booked' || b.status === 'checked_in'));
   const refundAmount = affected.reduce((s, b) => s + b.paidAmount, 0);
-  const afterCloseReadings = state.waterReadings.filter((w) => w.sessionId === sessionId && session.closedAt && w.at > session.closedAt);
+
+  // 恢复门禁以“当前生效闭池档案”为唯一依据（清场清洁 + 消毒复测 + 必要的达标水质）
+  const activeRecord = state.closureRecords.find((r) => r.id === session.activeClosureId);
+  const closureTask = (kind: 'cleaning' | 'disinfection') => {
+    if (!activeRecord) return undefined;
+    const t = state.workTasks.find((x) => activeRecord.taskIds.includes(x.id) && x.kind === kind);
+    return t;
+  };
+  const cleaningTask = closureTask('cleaning');
+  const disinfectionTask = closureTask('disinfection');
+  const cleaningDone = cleaningTask?.status === 'done';
+  const disinfectionDone = disinfectionTask?.status === 'done';
+  const afterCloseReadings = activeRecord
+    ? state.waterReadings.filter((w) => w.sessionId === sessionId && w.at > activeRecord.closedAt)
+    : [];
   const retestPass = afterCloseReadings.some((w) => !w.abnormal);
+  const waterRequired = activeRecord?.requireWaterRetest;
+  const canReopen = !!activeRecord && cleaningDone && disinfectionDone && (!waterRequired || retestPass);
+  const reopenBlockers = [
+    !cleaningDone ? '清场清洁工单未完成' : '',
+    !disinfectionDone ? '消毒复测工单未完成' : '',
+    waterRequired && !retestPass ? '尚无达标水质复测' : '',
+  ].filter(Boolean);
 
   const close = () =>
     act.mutateAsync({ path: '/pool-status', body: { sessionId, status: 'closed', reason, cause, refund, compVoucher: voucher, notifyResidents: push, requireWaterRetest: retest } })
@@ -317,19 +338,30 @@ function CloseReopen({ state, user }: Props) {
       <PoolStatusBanner status={session.poolStatus} reason={session.statusReason} requireRetest={session.requireWaterRetest} closedAt={session.closedAt} reopenedAt={session.reopenedAt} />
       <div className="grid cols-2">
         <Card title="闭池决策与一键联动">
-          {session.poolStatus === 'closed' ? (
+          {session.poolStatus === 'closed' && activeRecord ? (
             <div>
-              <div className="alert danger">本场已闭池：{session.statusReason}</div>
-              <h4>恢复开放前置条件核对</h4>
-              <div className="task-row done">✔ 退费/补偿：{bookingsDone(state, sessionId)}</div>
-              <div className={`task-row ${retestPass ? 'done' : ''}`}>
-                <div className="content">水质复测达标（闭池后须有一次合格读数）{afterCloseReadings.length ? `，已有 ${afterCloseReadings.length} 次复测` : '，维修尚未提交复测'}</div>
-                {retestPass && <Badge tone="ok">已达标</Badge>}
+              <div className="alert danger">第{zh(activeRecord.seq)}轮闭池中：{activeRecord.reason}</div>
+              <h4>恢复开放前置条件核对（以本轮闭池档案为唯一依据）</h4>
+              <div className="task-row done"><div className="content">退费/补偿：{bookingsDone(state, sessionId)}</div><Badge tone="ok">已联动</Badge></div>
+              <div className={`task-row ${cleaningDone ? 'done' : ''}`}>
+                <div className="content">清场清洁工单{cleaningTask ? `（${cleaningTask.assigneeName ?? '保洁'} ${cleaningTask.status === 'done' ? '已完成：' + (cleaningTask.result ?? '') : cleaningTask.status === 'in_progress' ? '处理中' : '待处理'}）` : '缺失'}</div>
+                {cleaningDone ? <Badge tone="ok">已完成</Badge> : <Badge tone="danger">未完成</Badge>}
               </div>
-              <div className={`task-row ${tasksDone(state, sessionId) ? 'done' : ''}`}><div className="content">消毒复测与清场保洁工单完成</div>{tasksDone(state, sessionId) && <Badge tone="ok">已完成</Badge>}</div>
-              {session.requireWaterRetest && !retestPass && <div className="alert warn">还不能恢复开放：请通知维修在「设备与水质复测」录入达标读数。</div>}
-              <button className="btn" style={{ marginTop: 10 }} disabled={act.isPending || (session.requireWaterRetest && !retestPass)} onClick={reopen}>
-                ✅ 复测合格，恢复开放（同步居民端与现场端）
+              <div className={`task-row ${disinfectionDone ? 'done' : ''}`}>
+                <div className="content">消毒复测工单{disinfectionTask ? `（${disinfectionTask.assigneeName ?? '维修'} ${disinfectionTask.status === 'done' ? '已完成：' + (disinfectionTask.result ?? '') : disinfectionTask.status === 'in_progress' ? '处理中' : '待处理'}）` : '缺失'}</div>
+                {disinfectionDone ? <Badge tone="ok">已完成</Badge> : <Badge tone="danger">未完成</Badge>}
+              </div>
+              {waterRequired && (
+                <div className={`task-row ${retestPass ? 'done' : ''}`}>
+                  <div className="content">达标水质复测（晚于本轮闭池时间）{afterCloseReadings.length ? `，已提交 ${afterCloseReadings.length} 次${retestPass ? '，最近一次达标' : ''}` : '，维修尚未提交复测'}</div>
+                  {retestPass ? <Badge tone="ok">已达标</Badge> : <Badge tone="danger">未达标</Badge>}
+                </div>
+              )}
+              {!canReopen && (
+                <div className="alert warn">还不能恢复开放：{reopenBlockers.join('、')}。请在保洁/维修完成各自工单{waterRequired ? '，并由维修/救生员录入一次达标水质复测' : ''}后再恢复。</div>
+              )}
+              <button className="btn" style={{ marginTop: 10 }} disabled={act.isPending || !canReopen} onClick={reopen}>
+                {canReopen ? '✅ 处置全部完成，恢复开放（同步居民端与现场端）' : '处置未完成，禁止恢复开放'}
               </button>
             </div>
           ) : (
@@ -403,7 +435,11 @@ function ClosureArchives({ state, sessionId }: { state: AppState; sessionId: str
               <dt>退费补偿</dt><dd>{r.refundCount} 笔 / ¥{r.refundTotal} · 补偿券 {r.voucherCount} 张</dd>
               <dt>清场</dt><dd>撤哨 {r.guardReliefCount} 人 · 联动工单 {r.taskIds.length} 个</dd>
               <dt>通知</dt><dd>{r.announcementIds.length} 条（全员公告+逐人通知）</dd>
-              <dt>恢复</dt><dd>{r.status === 'reopened' ? `${fmtDateTime(r.reopenedAt)} · ${r.reopenedBy ?? ''}${r.retestReadingId ? ' · 复测 ' + r.retestReadingId + ' 达标' : ''}` : '等待复测与恢复'}</dd>
+              <dt>恢复门禁</dt>
+              <dd>{r.status === 'reopened'
+                ? `清场${r.reopenChecklist?.cleaning ? '✓(' + (r.reopenChecklist.cleaning.assigneeName ?? '保洁') + ')' : '—'} · 消毒${r.reopenChecklist?.disinfection ? '✓(' + (r.reopenChecklist.disinfection.assigneeName ?? '维修') + ')' : '—'}${r.requireWaterRetest ? ' · 水质复测✓' : ''}`
+                : '等待清场、消毒与必要复测全部完成'}</dd>
+              <dt>恢复</dt><dd>{r.status === 'reopened' ? `${fmtDateTime(r.reopenedAt)} · ${r.reopenedBy ?? ''}${r.retestReadingId ? ' · 复测 ' + r.retestReadingId + ' 达标' : ''}` : '处置未完成，禁止恢复'}</dd>
             </dl>
             <details style={{ marginTop: 6 }}>
               <summary className="small muted" style={{ cursor: 'pointer' }}>逐人处置结果（{r.affected.length}）</summary>
@@ -426,10 +462,6 @@ function ClosureArchives({ state, sessionId }: { state: AppState; sessionId: str
 function bookingsDone(state: AppState, sessionId: string) {
   const list = state.bookings.filter((b) => b.sessionId === sessionId && (b.status === 'refunded' || b.status === 'compensated'));
   return list.length ? `已处理 ${list.length} 笔（退费/补偿到账）` : '进行中';
-}
-function tasksDone(state: AppState, sessionId: string) {
-  const need = state.workTasks.filter((t) => t.sessionId === sessionId && t.source === 'closure');
-  return need.length > 0 && need.every((t) => t.status === 'done');
 }
 
 // ============ 事件指挥 ============

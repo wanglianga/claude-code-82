@@ -87,8 +87,10 @@ export function lockConflicts(db: DB, session: Session, lock: { id?: string; zon
 }
 
 export function pushNotification(db: DB, n: Omit<Notification, 'id' | 'at'>) {
-  db.notifications.unshift({ ...n, id: nextId('nt'), at: now() });
-  if (db.notifications.length > 200) db.notifications.length = 200;
+  const created: Notification = { ...n, id: nextId('nt'), at: now() };
+  db.notifications.unshift(created);
+  if (db.notifications.length > 300) db.notifications.length = 300;
+  return created.id;
 }
 
 // ============ 跨角色事件模板 ============
@@ -460,43 +462,96 @@ export function changePoolStatus(db: DB, operator: string, req: {
   const prev = session.poolStatus;
   session.closureIds = session.closureIds ?? [];
 
-  // ---------- 恢复开放：只更新当前开放状态，并回写“本轮”闭池档案，历史档案不可变 ----------
+  // ---------- 恢复开放：以“当前生效闭池档案”为唯一门禁依据，历史档案不可变 ----------
   if (req.status === 'normal') {
     if (prev !== 'closed' && prev !== 'restricted') return { session, reopened: false as const };
     const active = session.activeClosureId
       ? db.closureRecords.find((r) => r.id === session.activeClosureId)
       : undefined;
+    if (!active) {
+      // 限流（无闭池档案）：处置完成后直接解除限流，不涉及闭池门禁
+      session.poolStatus = 'normal';
+      session.statusReason = undefined;
+      session.reopenedAt = now();
+      pushNotification(db, {
+        title: `限流解除：${session.label}`, level: 'info', roles: [],
+        body: '现场异常已处置，限流解除，恢复正常入场。', sessionId: session.id,
+      });
+      return { session, reopened: true as const, closure: undefined };
+    }
+
+    // 仅核验本轮闭池联动生成的工单（closureId 精确匹配，其他场次/例行工单不算数）
+    const taskResult = (kind: 'cleaning' | 'disinfection') => {
+      const t = db.workTasks.find((x) => active.taskIds.includes(x.id) && x.kind === kind);
+      if (!t) return { ok: false as const, reason: '缺少联动处置工单', task: undefined as WorkTask | undefined };
+      if (t.status !== 'done') return { ok: false as const, reason: `${t.title}仍为${t.status === 'in_progress' ? '处理中' : '待处理'}`, task: t };
+      return { ok: true as const, reason: '', task: t };
+    };
+    const cleaning = taskResult('cleaning');
+    const disinfection = taskResult('disinfection');
+
     let retestReading: WaterReading | undefined;
-    if (active?.requireWaterRetest && active.closedAt) {
+    if (active.requireWaterRetest) {
       retestReading = db.waterReadings.find(
         (w) => w.sessionId === session.id && w.at > active.closedAt && !w.abnormal,
       );
-      if (!retestReading) throw new HttpError(409, '本轮闭池原因涉及水质，须先完成一次达标复测（救生员/维修录入合格水质数据）');
     }
+
+    // 任一门禁未完成：拒绝恢复，且不改动场次状态、不发送恢复通知、不改动档案与退费补偿
+    const missing: string[] = [];
+    if (!cleaning.ok) missing.push(`清场清洁未完成（${cleaning.reason}）`);
+    if (!disinfection.ok) missing.push(`消毒复测未完成（${disinfection.reason}）`);
+    if (active.requireWaterRetest && !retestReading) missing.push('尚无晚于本轮闭池时间的达标水质复测读数');
+    if (missing.length) {
+      throw new HttpError(409, `本轮闭池处置尚未完成，不能恢复开放：${missing.join('；')}。恢复开放必须以本轮闭池事件为唯一依据，清场、消毒复测与必要的达标水质全部完成后方可放行。`);
+    }
+
     const at = now();
     session.poolStatus = 'normal';
     session.statusReason = undefined;
     session.reopenedAt = at;
     session.requireWaterRetest = false;
     session.activeClosureId = undefined;
-    if (active) {
-      active.status = 'reopened';
-      active.reopenedAt = at;
-      active.reopenedBy = operator;
-      if (retestReading) active.retestReadingId = retestReading.id;
-      active.reopenNote = '复测合格、现场处置完成，恢复开放';
-    }
-    const reason = active?.reason ?? session.statusReason ?? '';
-    const seq = active ? `第${toZh(active.seq)}轮` : '';
-    pushNotification(db, {
+
+    // 回写本轮档案（仅回写恢复结果；闭池原因/退费/补偿等历史字段不变）
+    active.status = 'reopened';
+    active.reopenedAt = at;
+    active.reopenedBy = operator;
+    if (retestReading) active.retestReadingId = retestReading.id;
+    active.reopenNote = '本轮清场清洁、消毒复测与水质复测全部完成，恢复开放';
+    active.reopenChecklist = {
+      cleaning: cleaning.task ? {
+        taskId: cleaning.task.id, title: cleaning.task.title, kind: cleaning.task.kind,
+        assigneeRole: cleaning.task.assigneeRole, assigneeName: cleaning.task.assigneeName,
+        doneAt: cleaning.task.doneAt!, result: cleaning.task.result,
+      } : null,
+      disinfection: disinfection.task ? {
+        taskId: disinfection.task.id, title: disinfection.task.title, kind: disinfection.task.kind,
+        assigneeRole: disinfection.task.assigneeRole, assigneeName: disinfection.task.assigneeName,
+        doneAt: disinfection.task.doneAt!, result: disinfection.task.result,
+      } : null,
+      water: retestReading ? {
+        readingId: retestReading.id, at: retestReading.at, recorder: retestReading.recorder,
+        tempC: retestReading.tempC, freeChlorine: retestReading.freeChlorine,
+        turbidity: retestReading.turbidity, ph: retestReading.ph,
+      } : null,
+    };
+
+    const reason = active.reason;
+    const seq = `第${toZh(active.seq)}轮`;
+    const reopenIds: string[] = [];
+    const n1 = pushNotification(db, {
       title: `恢复开放：${session.label}`, level: 'info', roles: [],
-      body: `${seq}闭池（${reason}）已结束：水质复测合格、现场处置完成，泳池恢复开放。本轮退费与补偿券已发放，居民可重新预约后续场次。`,
-      sessionId: session.id,
+      body: `${seq}闭池（${reason}）已结束：清场清洁、消毒复测${retestReading ? '与达标水质复测' : ''}均已完成，泳池恢复开放。本轮退费与补偿券已发放，居民可重新预约后续场次。`,
+      sessionId: session.id, closureId: active.id,
     });
-    pushNotification(db, {
+    const n2 = pushNotification(db, {
       title: `恢复开放提醒：${session.label}`, level: 'info', roles: ['lifeguard', 'frontdesk', 'cleaner'],
-      body: '请救生员重新到岗、前台恢复核验、保洁完成开场清洁。', sessionId: session.id,
+      body: '请救生员重新到岗、前台恢复核验、保洁完成开场清洁。', sessionId: session.id, closureId: active.id,
     });
+    reopenIds.push(n1, n2);
+    active.reopenNotificationIds = reopenIds;
+
     return { session, reopened: true as const, closure: active };
   }
 

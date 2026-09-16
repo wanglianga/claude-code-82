@@ -21,7 +21,26 @@ const login = async (u) => (await api('/auth/login', null, { username: u, passwo
 const ops = await login('ops');
 const li = await login('li');
 const mt = await login('maintenance');
+const cl = await login('cleaner');
 const state = async (tok) => (await api('/state', tok, undefined, 'GET')).data;
+
+/** 完成当前生效闭池档案联动生成的清场/消毒工单（可指定只完成某些 kind） */
+async function completeRoundTasksPartial(recId, kinds) {
+  const s = await state(ops);
+  const rec = s.closureRecords.find((x) => x.id === recId);
+  for (const taskId of rec.taskIds) {
+    const t = s.workTasks.find((x) => x.id === taskId);
+    if (!t || t.status === 'done') continue;
+    if (kinds && !kinds.includes(t.kind)) continue;
+    const tok = t.assigneeRole === 'cleaner' ? cl : mt;
+    await api(`/tasks/${t.id}/claim`, tok, {});
+    const done = await api(`/tasks/${t.id}/done`, tok, { result: `${t.kind}处置完成` });
+    if (done.status !== 200) throw new Error(`工单 ${t.id} 完成失败 ${done.data.error}`);
+  }
+}
+async function completeRoundTasks(recId) {
+  await completeRoundTasksPartial(recId, null);
+}
 
 console.log('① 第一轮：雷雨闭池（退费+补偿券+通知+复测要求）');
 const liWalletBefore = (await state(li)).users.length; // residents users=[]; use /me for wallet
@@ -52,15 +71,36 @@ const rec1Snapshot = JSON.stringify({
   guardReliefCount: rec1.guardReliefCount, incidentIds: rec1.incidentIds,
 });
 
-console.log('② 无复测不能恢复 → 维修复测达标 → 恢复');
+console.log('② 未完成处置不能恢复 → 完成清场/消毒工单+达标复测 → 恢复');
+// 2.1 无任何处置
 r = await api('/pool-status', ops, { sessionId: 's-mid', status: 'normal' });
-check('未复测拒绝恢复', r.status === 409);
+check('无处置拒绝恢复（提示清场/消毒/复测缺项）', r.status === 409 && /清场清洁|消毒复测|复测/.test(r.data.error || ''), r.data.error);
+
+// 2.2 仅达标水质，工单未完成：仍拒绝，场次/通知/档案不变
 r = await api('/water', mt, { sessionId: 's-mid', tempC: 27, freeChlorine: 0.8, turbidity: 0.5, ph: 7.3, note: '雷雨后复测' });
 check('维修提交达标复测', r.status === 201 && r.data.abnormal === false);
 r = await api('/pool-status', ops, { sessionId: 's-mid', status: 'normal' });
-check('恢复开放成功', r.status === 200 && r.data.reopened === true);
+check('仅水质达标但清场/消毒待办未完成仍拒绝恢复', r.status === 409 && /清场清洁|消毒复测/.test(r.data.error || ''), r.data.error);
+st = await state(ops);
+check('拒绝期间场次仍闭池、无恢复通知、档案仍 closed',
+  st.sessions.find((s) => s.id === 's-mid').poolStatus === 'closed'
+  && !st.notifications.some((n) => n.title.startsWith('恢复开放：'))
+  && st.closureRecords.find((x) => x.id === rec1.id).status === 'closed');
+
+// 2.3 只完成清场、未完成消毒：仍拒绝
+await completeRoundTasksPartial(rec1.id, ['cleaning']);
+r = await api('/pool-status', ops, { sessionId: 's-mid', status: 'normal' });
+check('清场完成但消毒未完成仍拒绝', r.status === 409 && /消毒复测/.test(r.data.error || ''), r.data.error);
+
+// 2.4 完成全部工单后恢复
+await completeRoundTasksPartial(rec1.id, ['disinfection']);
+r = await api('/pool-status', ops, { sessionId: 's-mid', status: 'normal' });
+check('处置全部完成后恢复开放成功', r.status === 200 && r.data.reopened === true, r.data.error);
 st = await state(ops);
 let rec1After = st.closureRecords.find((x) => x.id === rec1.id);
+check('第一轮档案回写恢复核验快照（清场/消毒/水质结果）',
+  !!rec1After.reopenChecklist?.cleaning?.doneAt && !!rec1After.reopenChecklist?.disinfection?.doneAt
+  && !!rec1After.reopenChecklist?.water?.readingId && (rec1After.reopenNotificationIds || []).length === 2);
 check('第一轮档案状态=已恢复且记录复测依据', rec1After.status === 'reopened' && !!rec1After.reopenedAt && !!rec1After.retestReadingId);
 check('场次当前开放、生效档案已清空', st.sessions.find((s) => s.id === 's-mid').poolStatus === 'normal' && !st.sessions.find((s) => s.id === 's-mid').activeClosureId);
 
@@ -102,14 +142,18 @@ check('第一轮固化的处置字段未被第二轮覆盖', JSON.stringify({
 check('第一轮退费总额与笔数保留', recs[0].refundTotal === rec1After.refundTotal && recs[0].affected.length === rec1After.affected.length);
 check('场次指向第二轮生效档案', st.sessions.find((s) => s.id === 's-mid').activeClosureId === rec2.id);
 
-console.log('⑤ 第二轮复测恢复，两份档案并存可追溯');
+console.log('⑤ 第二轮同样须三项齐备：仅水质达标先拒绝 → 完成工单 → 恢复');
 r = await api('/water', mt, { sessionId: 's-mid', tempC: 27, freeChlorine: 0.7, turbidity: 0.5, ph: 7.2, note: '加氯后复测' });
 check('第二轮复测达标', r.status === 201);
 r = await api('/pool-status', ops, { sessionId: 's-mid', status: 'normal' });
-check('第二轮恢复开放', r.status === 200);
+check('第二轮清场/消毒工单未完成时拒绝恢复', r.status === 409 && /清场清洁|消毒复测/.test(r.data.error || ''), r.data.error);
+await completeRoundTasks(rec2.id);
+r = await api('/pool-status', ops, { sessionId: 's-mid', status: 'normal' });
+check('第二轮处置齐备后恢复开放', r.status === 200);
 st = await state(ops);
 recs = st.closureRecords.filter((x) => x.sessionId === 's-mid').sort((a, b) => a.seq - b.seq);
 check('两份档案均为已恢复且原因各自独立', recs.length === 2 && recs[0].reason.includes('雷电') && recs[1].reason.includes('余氯') && recs.every((x) => x.status === 'reopened'));
+check('两份档案均回写恢复核验快照', recs.every((x) => !!x.reopenChecklist?.cleaning && !!x.reopenChecklist?.disinfection && !!x.reopenChecklist?.water));
 check('场次 closureIds 记录两轮', st.sessions.find((s) => s.id === 's-mid').closureIds.length === 2);
 
 console.log('⑥ 居民视图：各自只看到自己的退费/补偿档案条目');

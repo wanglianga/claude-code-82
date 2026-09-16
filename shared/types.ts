@@ -362,6 +362,37 @@ export interface ClosureRecord {
   /** 恢复开放所依据的达标复测读数 id */
   retestReadingId?: string;
   reopenNote?: string;
+  /** 恢复时实际送达的通知 id（回写同一轮档案） */
+  reopenNotificationIds?: string[];
+  /** 恢复门禁核验快照：恢复瞬间固化各项处置完成结果，之后不再变化 */
+  reopenChecklist?: {
+    cleaning: ClosureTaskResult | null;
+    disinfection: ClosureTaskResult | null;
+    /** 必要时（requireWaterRetest）的达标水质记录快照；不需要时为 null */
+    water: ClosureWaterResult | null;
+  };
+}
+
+/** 闭池联动工单的完成结果快照 */
+export interface ClosureTaskResult {
+  taskId: string;
+  title: string;
+  kind: TaskKind;
+  assigneeRole: 'cleaner' | 'maintenance';
+  assigneeName?: string;
+  doneAt: string;
+  result?: string;
+}
+
+/** 恢复开放所依据的达标水质复测快照 */
+export interface ClosureWaterResult {
+  readingId: string;
+  at: string;
+  recorder: string;
+  tempC: number;
+  freeChlorine: number;
+  turbidity: number;
+  ph: number;
 }
 
 /** 钱包流水 */

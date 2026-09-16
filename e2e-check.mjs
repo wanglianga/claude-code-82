@@ -152,14 +152,45 @@ check('居民收到个人闭池通知', st.notifications.some(n => n.userId === 
 check('救生岗闭池撤哨', st.guardDuties.filter(d => d.sessionId === 's-mid' && !d.end).length === 0);
 check('生成闭池复测+清场工单', st.workTasks.some(t => t.sessionId === 's-mid' && t.title.includes('闭池后全面消毒')) && st.workTasks.some(t => t.sessionId === 's-mid' && t.title.includes('闭池清场')));
 
-// ---------- 8. 闭池期间恢复应被拦截；复测达标后恢复 ----------
-console.log('⑧ 恢复开放门禁：无复测不能开 → 维修复测达标 → 恢复');
+// ---------- 8. 恢复门禁：清场清洁 + 消毒复测工单 + 必要达标水质，三者齐备方可恢复 ----------
+console.log('⑧ 恢复开放门禁：处置未完成一律拒绝 → 三项齐备后恢复');
+let opsSt = (await api('/state', tOps, undefined, 'GET')).data;
+let activeClosure = opsSt.closureRecords.find(c => c.sessionId === 's-mid' && c.status === 'closed');
+check('存在本轮闭池档案', !!activeClosure);
+const closureCleaning = opsSt.workTasks.find(t => activeClosure.taskIds.includes(t.id) && t.kind === 'cleaning');
+const closureDisinfection = opsSt.workTasks.find(t => activeClosure.taskIds.includes(t.id) && t.kind === 'disinfection');
+check('本轮联动生成清场+消毒工单', !!closureCleaning && !!closureDisinfection);
+
+// 8.1 什么都没做：恢复被拒（错误消息点明缺项）
 r = await api('/pool-status', tOps, { sessionId: 's-mid', status: 'normal' });
-check('未复测拒绝恢复', r.status === 409, r.data.error);
+check('无任何处置时拒绝恢复', r.status === 409 && /清场清洁/.test(r.data.error || ''), r.data.error);
+
+// 8.2 仅录入达标水质，工单未完成：仍拒绝；场次状态/通知/档案不变
 r = await api('/water', tMt, { sessionId: 's-mid', tempC: 27.0, freeChlorine: 0.8, turbidity: 0.5, ph: 7.3, note: 'E2E 复测达标' });
 check('维修提交复测达标读数', r.status === 201 && r.data.abnormal === false);
 r = await api('/pool-status', tOps, { sessionId: 's-mid', status: 'normal' });
-check('复测后恢复开放成功', r.status === 200 && r.data.reopened === true, JSON.stringify(r.data));
+check('仅水质达标但清场/消毒待办未完成，仍拒绝恢复', r.status === 409 && (/清场清洁/.test(r.data.error) || /消毒复测/.test(r.data.error)), r.data.error);
+opsSt = (await api('/state', tOps, undefined, 'GET')).data;
+check('拒绝恢复后场次仍为闭池', opsSt.sessions.find(s => s.id === 's-mid').poolStatus === 'closed');
+check('拒绝恢复未产生恢复通知', !opsSt.notifications.some(n => n.title.includes('恢复开放：')));
+check('本轮档案仍为闭池状态（未被污染）', opsSt.closureRecords.find(c => c.id === activeClosure.id)?.status === 'closed');
+
+// 8.3 完成清场清洁（保洁）与消毒复测（维修）工单
+for (const [tok, task] of [[tCl, closureCleaning], [tMt, closureDisinfection]]) {
+  const claim = await api(`/tasks/${task.id}/claim`, tok, {});
+  check(`工单 ${task.kind} 可接单`, claim.status === 200, claim.data.error);
+  const done = await api(`/tasks/${task.id}/done`, tok, { result: task.kind === 'cleaning' ? '池岸/淋浴/更衣室清场清洁完成' : '加氯反冲洗完成，复测达标' });
+  check(`工单 ${task.kind} 可完成`, done.status === 200, done.data.error);
+}
+r = await api('/pool-status', tOps, { sessionId: 's-mid', status: 'normal' });
+check('三项处置齐备后恢复开放成功', r.status === 200 && r.data.reopened === true, JSON.stringify(r.data));
+opsSt = (await api('/state', tOps, undefined, 'GET')).data;
+const finalClosure = opsSt.closureRecords.find(c => c.id === activeClosure.id);
+check('档案回写恢复核验快照（清场/消毒/水质结果齐全）',
+  !!finalClosure.reopenChecklist?.cleaning?.doneAt && !!finalClosure.reopenChecklist?.disinfection?.doneAt && !!finalClosure.reopenChecklist?.water?.readingId,
+  JSON.stringify(finalClosure.reopenChecklist));
+check('档案回写恢复时间与恢复通知', !!finalClosure.reopenedAt && (finalClosure.reopenNotificationIds || []).length === 2);
+
 st = (await api('/state', tLi, undefined, 'GET')).data;
 check('居民端看到恢复开放通告', st.notifications.some(n => n.title.includes('恢复开放')));
 
