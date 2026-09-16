@@ -57,9 +57,11 @@ export function seed(): DB {
       poolStatus: 'normal', maxCapacity: 154, locks: [
         { id: 'lock-1', zoneId: 'training', lane: 1, reason: 'coaching', title: '蓝鲸培训·自由泳提高班', contactName: '赵晓', contactPhone: '13800000005', capacity: 8, isCommercial: false },
       ],
-      // 早场老人晨泳 2 号道抽筋救援复盘后，站位调整带入本场：救生巡查重点关注同一泳道
+      // 早场老人晨泳 2 号道抽筋救援复盘后，站位调整（第 1 版）带入本场：救生巡查重点关注同一泳道
       guardFocusLanes: [
-        { zoneId: 'shallow', lane: 2, reason: '上场（早场·老人晨泳）该泳道发生抽筋救援 CR-2059，复盘要求加强浅水岗瞭望与老人泳道提醒', rescueId: 'cr-seed-1', fromSessionId: 's-am', at: rel(-85) },
+        { zoneId: 'shallow', lane: 2, version: 1, by: '刘救生', history: [],
+          reason: '上场（早场·老人晨泳）该泳道发生抽筋救援 CR-2059，第1版站位策略：复盘要求加强浅水岗瞭望与老人泳道提醒',
+          rescueId: 'cr-seed-1', fromSessionId: 's-am', at: rel(-85) },
       ],
       closureIds: [], createdAt: rel(-120),
     },
@@ -69,7 +71,9 @@ export function seed(): DB {
         { id: 'lock-2', zoneId: 'family', reason: 'institution_rental', title: '蓝鲸游泳培训机构·少儿包场（洽谈中）', contactName: '赵晓', contactPhone: '13800000005', capacity: 30, isCommercial: true },
       ],
       guardFocusLanes: [
-        { zoneId: 'shallow', lane: 2, reason: '早场老人晨泳 2 号道抽筋救援 CR-2059 站位调整：持续重点关注', rescueId: 'cr-seed-1', fromSessionId: 's-am', at: rel(-85) },
+        { zoneId: 'shallow', lane: 2, version: 1, by: '刘救生', history: [],
+          reason: '早场老人晨泳 2 号道抽筋救援 CR-2059 第1版站位策略：持续重点关注',
+          rescueId: 'cr-seed-1', fromSessionId: 's-am', at: rel(-85) },
       ],
       closureIds: [], createdAt: rel(-60),
     },
@@ -191,7 +195,7 @@ export function seed(): DB {
       order_restored: { done: true, at: rel(-140), by: '周救生', note: '浅水各道游进秩序恢复' },
     },
     adjustments: [
-      { at: rel(-150), by: '刘救生', content: '老人晨泳场浅水岗增加一名机动巡视，2 号道两端各安排瞭望提醒，下水前广播热身提示' },
+      { version: 1, at: rel(-150), by: '刘救生', content: '老人晨泳场浅水岗增加一名机动巡视，2 号道两端各安排瞭望提醒，下水前广播热身提示' },
     ],
     laneSuspended: false, laneSuspendReason: '抽筋救援处置，泳道临时关闭',
     reviewedAt: rel(-90), reviewedBy: '孙运营',

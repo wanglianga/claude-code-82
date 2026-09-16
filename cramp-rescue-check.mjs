@@ -148,7 +148,7 @@ r = await api('/bookings', tZhang, {
   age: 42, healthPledge: true, swimLevel: 'advanced', paymentMethod: 'wallet',
 });
 check('解除后临停泳道恢复可预约 201', r.status === 201, JSON.stringify(r.data));
-r = await api('/bookings/B-2064/checkin', tFd, {
+r = await api(`/bookings/${zhaoBooking.id}/checkin`, tFd, {
   healthCode: 'green', medicalCert: false, childCompanion: '', childCompanionPhone: '', lockerNo: 'C10',
 });
 check('解除后核验不再被临停拦截（按健康码规则继续校验）', r.status !== 409 || !r.data.error.includes('临时关闭'), JSON.stringify(r.data));
@@ -160,22 +160,74 @@ check('三项确认全部完成且推送完成通告',
   ['guard_relief', 'lane_reopen', 'order_restored'].every((k) => lg4.crampRescues.find((x) => x.id === rescueId).closure[k].done)
   && lg4.notifications.some((n) => n.title.includes('收尾三项确认全部完成')));
 
-console.log('⑤ 站位调整 → 下一场救生巡查重点关注同一泳道');
-r = await api(`/cramp-rescues/${rescueId}/adjust`, tLg, {
-  content: '深水台加派机动巡视，4 号道两端重点瞭望，下水前广播热身提示', propagateToNextSessions: true,
-});
-check('站位调整记录成功', r.status === 200 && r.data.rescue.adjustments.length === 1, JSON.stringify(r.data));
-check('调整已传播到下午场与晚场（2 个后续场次）', r.data.propagated.length === 2
-  && r.data.propagated.some((p) => p.id === 's-pm') && r.data.propagated.some((p) => p.id === 's-eve'),
-  JSON.stringify(r.data.propagated));
-const lg5 = await state(tLg);
-check('下午场看板出现「重点关注训练区 4 号道」提醒', findBoard(lg5, 's-pm').focusLanes.some((f) => f.zoneId === 'training' && f.lane === 4 && f.rescueId === rescueId));
-check('早场（早于事发场）不被回溯写入关注', !findBoard(lg5, 's-am').focusLanes.some((f) => f.rescueId === rescueId));
-check('前台看不到救生内部关注泳道', findBoard(await state(tFd).then((s) => s), 's-pm').focusLanes.length === 0);
+console.log('⑤ 站位调整按版本同步：最新策略、重新确认、历史留痕、不回写已结束场次');
+const v1 = '深水台加派机动巡视，4 号道两端重点瞭望，下水前广播热身提示';
+r = await api(`/cramp-rescues/${rescueId}/adjust`, tLg, { content: v1, propagateToNextSessions: true });
+check('第 1 次调整记录成功（version=1）', r.status === 200 && r.data.version === 1
+  && r.data.rescue.adjustments.length === 1 && r.data.rescue.adjustments[0].version === 1, JSON.stringify(r.data));
+check('第 1 版同步 2 个未开始场次（下午场/晚场新建）', r.data.targets.length === 2
+  && r.data.targets.every((p) => p.status === 'created')
+  && r.data.targets.some((p) => p.id === 's-pm') && r.data.targets.some((p) => p.id === 's-eve'),
+  JSON.stringify(r.data.targets));
+let lg5 = await state(tLg);
+let pmFocus = findBoard(lg5, 's-pm').focusLanes.find((f) => f.rescueId === rescueId);
+check('下午场提醒为第 1 版策略', pmFocus.version === 1 && pmFocus.reason.includes(v1) && !pmFocus.ackAt);
+check('早场（早于事发且已结束）不被回溯写入关注', !findBoard(lg5, 's-am').focusLanes.some((f) => f.rescueId === rescueId));
+check('事发当前场（进行中）不被回写关注', !findBoard(lg5, 's-mid').focusLanes.some((f) => f.rescueId === rescueId));
+check('种子带入的浅水 2 号道关注不受影响', findBoard(lg5, 's-mid').focusLanes.some((f) => f.rescueId === 'cr-seed-1' && f.version === 1));
+check('前台看不到救生内部关注泳道', findBoard(await state(tFd), 's-pm').focusLanes.length === 0);
+
+// 下午场救生员确认第 1 版
 r = await api('/sessions/s-pm/focus-lanes/ack', tLg, { rescueId, zoneId: 'training', lane: 4 });
-check('下一场救生员确认重点关注', r.status === 200 && r.data.ackBy === '刘救生', JSON.stringify(r.data));
+check('下午场确认第 1 版关注', r.status === 200 && r.data.ackBy === '刘救生' && r.data.version === 1, JSON.stringify(r.data));
+
+// 第 2 次调整：下午场已确认过第 1 版，必须按新策略重新待确认，且历史确认可查
+const v2 = '改为浅水台与深水台交叉瞭望 4 号道，机动岗每 10 分钟巡至该道，晚高峰加派一人';
+r = await api(`/cramp-rescues/${rescueId}/adjust`, tLg, { content: v2, propagateToNextSessions: true });
+check('第 2 次调整记录成功（version=2）', r.status === 200 && r.data.version === 2
+  && r.data.rescue.adjustments.length === 2 && r.data.rescue.adjustments[1].content === v2, JSON.stringify(r.data));
+const pmTarget = r.data.targets.find((p) => p.id === 's-pm');
+const eveTarget = r.data.targets.find((p) => p.id === 's-eve');
+check('下午/晚场标记为 updated', pmTarget?.status === 'updated' && eveTarget?.status === 'updated');
+check('已确认的下午场触发重新确认标记', pmTarget.resetAck === true);
+lg5 = await state(tLg);
+pmFocus = findBoard(lg5, 's-pm').focusLanes.find((f) => f.rescueId === rescueId);
+check('【验收】未再确认的下午场显示第二次（最新）策略', pmFocus.version === 2 && pmFocus.reason.includes(v2) && !pmFocus.reason.includes(v1),
+  JSON.stringify({ version: pmFocus.version, reason: pmFocus.reason }));
+check('下午场当前版本重新待确认（ackAt 已清空）', pmFocus.ackAt == null && pmFocus.ackBy == null);
+check('历史确认可查：v1 留档且保留当时确认人/时间', pmFocus.history.length === 1
+  && pmFocus.history[0].version === 1 && pmFocus.history[0].ackBy === '刘救生' && !!pmFocus.history[0].ackAt,
+  JSON.stringify(pmFocus.history));
+const eveFocus = findBoard(lg5, 's-eve').focusLanes.find((f) => f.rescueId === rescueId);
+check('晚场同样更新到第 2 版，v1 未确认留档', eveFocus.version === 2 && eveFocus.history.length === 1 && !eveFocus.history[0].ackAt);
+check('早场/当前场仍不被回写（含已结束场次保护）',
+  !findBoard(lg5, 's-am').focusLanes.some((f) => f.rescueId === rescueId)
+  && !findBoard(lg5, 's-mid').focusLanes.some((f) => f.rescueId === rescueId));
+
+// 确认第 2 版后再调整第 3 版：确认再次重置，两次历史确认均可查
+r = await api('/sessions/s-pm/focus-lanes/ack', tLg, { rescueId, zoneId: 'training', lane: 4 });
+check('下午场确认第 2 版', r.status === 200 && r.data.version === 2 && r.data.ackBy === '刘救生');
+const v3 = '维持交叉瞭望，4 号道热身区设提示牌，开场前 5 分钟广播';
+r = await api(`/cramp-rescues/${rescueId}/adjust`, tLg, { content: v3, propagateToNextSessions: true });
+check('第 3 次调整记录成功（version=3）', r.status === 200 && r.data.version === 3);
+lg5 = await state(tLg);
+pmFocus = findBoard(lg5, 's-pm').focusLanes.find((f) => f.rescueId === rescueId);
+check('下午场升到第 3 版并再次待确认', pmFocus.version === 3 && pmFocus.reason.includes(v3) && pmFocus.ackAt == null);
+check('v1/v2 两版历史与各自确认情况完整可查', pmFocus.history.length === 2
+  && pmFocus.history[0].version === 1 && pmFocus.history[0].ackBy === '刘救生'
+  && pmFocus.history[1].version === 2 && pmFocus.history[1].ackBy === '刘救生',
+  JSON.stringify(pmFocus.history));
+r = await api('/sessions/s-pm/focus-lanes/ack', tLg, { rescueId, zoneId: 'training', lane: 4 });
+check('下午场最终确认第 3 版', r.status === 200 && r.data.version === 3 && r.data.ackAt != null);
 const lg6 = await state(tLg);
-check('确认后看板显示已确认关注', findBoard(lg6, 's-pm').focusLanes.find((f) => f.rescueId === rescueId)?.ackAt != null);
+check('确认后看板显示已按最新版确认', findBoard(lg6, 's-pm').focusLanes.find((f) => f.rescueId === rescueId)?.ackAt != null
+  && findBoard(lg6, 's-pm').focusLanes.find((f) => f.rescueId === rescueId)?.version === 3);
+
+console.log('⑤b 不同步勾选时仅记录调整，不改写任何场次提醒');
+r = await api(`/cramp-rescues/${rescueId}/adjust`, tLg, { content: '仅本场口头强调的临时调整', propagateToNextSessions: false });
+check('不向下同步时 targets 为空且版本号仍递增', r.status === 200 && r.data.version === 4 && r.data.targets.length === 0);
+const lgNoSync = await state(tLg);
+check('下午场仍停留在第 3 版（不被第 4 版改写）', findBoard(lgNoSync, 's-pm').focusLanes.find((f) => f.rescueId === rescueId)?.version === 3);
 
 console.log('⑥ 运营组织本场复盘 → 救生员培训与排班');
 r = await api(`/cramp-rescues/${rescueId}/review`, tOps, {

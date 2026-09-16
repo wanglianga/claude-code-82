@@ -621,8 +621,22 @@ function RescueReviewTab({ state }: Props) {
                     <b className="small">{s.label}</b>
                     {(s.guardFocusLanes ?? []).map((f, i) => (
                       <div key={i} className="small muted">
-                        🛟 {state.zones.find((z) => z.id === f.zoneId)?.name} {f.lane} 号道{f.ackBy ? ` · ${f.ackBy}已确认关注` : ''}
+                        🛟 {state.zones.find((z) => z.id === f.zoneId)?.name} {f.lane} 号道
+                        <span className="badge purple" style={{ margin: '0 4px' }}>第{f.version}版</span>
+                        {f.ackBy ? `· ${f.ackBy} ${fmtDateTime(f.ackAt)} 已确认当前版` : '· 当前版待救生确认'}
                         <div>{f.reason}</div>
+                        {f.updatedAt && <div>最新更新 {fmtDateTime(f.updatedAt)} · {f.updatedBy}</div>}
+                        {f.history.length > 0 && (
+                          <details>
+                            <summary style={{ cursor: 'pointer' }}>历次策略与确认（{f.history.length}）</summary>
+                            {f.history.map((h) => (
+                              <div key={h.version} style={{ paddingLeft: 8 }}>
+                                第{h.version}版{h.by ? ` · ${h.by}` : ''}：{h.reason}
+                                {h.ackAt ? `（该版由 ${h.ackBy} ${fmtDateTime(h.ackAt)} 确认，后被新版替换）` : '（该版未确认即被替换）'}
+                              </div>
+                            ))}
+                          </details>
+                        )}
                       </div>
                     ))}
                   </div>

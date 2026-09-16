@@ -203,8 +203,10 @@ export function RescueCard({ rescue, state, user }: { rescue: CrampRescue; state
         {/* 站位调整 */}
         <div className="small muted" style={{ margin: '12px 0 4px' }}>救生员站位调整（影响本场复盘与后续场次巡查重点）</div>
         {rescue.adjustments.length === 0 && <div className="small muted">尚未记录站位调整</div>}
-        {rescue.adjustments.map((a, i) => (
-          <div key={i} className="small" style={{ padding: '4px 0' }}>· {a.content} <span className="muted">（{a.by} · {fmtDateTime(a.at)}）</span></div>
+        {rescue.adjustments.map((a) => (
+          <div key={a.version} className="small" style={{ padding: '4px 0' }}>
+            <span className="badge purple">第{a.version}版</span> {a.content} <span className="muted">（{a.by} · {fmtDateTime(a.at)}）</span>
+          </div>
         ))}
         {canManage && (
           <div style={{ marginTop: 6 }}>
@@ -238,7 +240,7 @@ export function RescueCard({ rescue, state, user }: { rescue: CrampRescue; state
   );
 }
 
-// ============ 看板顶部：下一场重点关注泳道提醒 ============
+// ============ 看板顶部：下一场重点关注泳道提醒（展示最新版本策略） ============
 export function FocusLaneAlerts({ state, sessionId }: { state: AppState; sessionId: string }) {
   const act = useAction();
   const notify = useNotify();
@@ -250,7 +252,7 @@ export function FocusLaneAlerts({ state, sessionId }: { state: AppState; session
       {lanes.map((f, i) => (
         <div key={i} className="alert warn" style={{ marginBottom: 6 }}>
           <div className="flex">
-            <b>🛟 本场重点关注：{zoneLabel(state, f.zoneId)} {f.lane} 号道</b>
+            <b>🛟 本场重点关注：{zoneLabel(state, f.zoneId)} {f.lane} 号道 <span className="badge purple" style={{ marginLeft: 4 }}>第 {f.version} 版策略</span></b>
             <span className="spacer" />
             {f.ackAt
               ? <Badge tone="ok">已确认关注 · {f.ackBy} {fmtDateTime(f.ackAt)}</Badge>
@@ -258,11 +260,23 @@ export function FocusLaneAlerts({ state, sessionId }: { state: AppState; session
                   onClick={() => act.mutateAsync({
                     path: `/sessions/${sessionId}/focus-lanes/ack`,
                     body: { rescueId: f.rescueId, zoneId: f.zoneId, lane: f.lane },
-                  }).then(() => notify.ok('已确认，本场巡查将重点关注该泳道')).catch((e) => notify.err(e))}>
-                救生巡查确认关注
+                  }).then(() => notify.ok('已确认，本场巡查将按最新策略重点关注该泳道')).catch((e) => notify.err(e))}>
+                救生巡查确认关注{f.history.length > 0 ? '（新版本，需重新确认）' : ''}
               </button>}
           </div>
           <div className="small" style={{ marginTop: 4 }}>{f.reason}</div>
+          {f.updatedAt && <div className="small muted">策略更新于 {fmtDateTime(f.updatedAt)} · {f.updatedBy}{f.history.length > 0 && !f.ackAt ? ' · 上一版确认已归档，需按新版重新确认' : ''}</div>}
+          {f.history.length > 0 && (
+            <details style={{ marginTop: 4 }}>
+              <summary className="small muted" style={{ cursor: 'pointer' }}>历次策略与确认留痕（{f.history.length} 版）</summary>
+              {f.history.map((h) => (
+                <div key={h.version} className="small muted" style={{ marginTop: 2, paddingLeft: 8, borderLeft: '2px solid var(--border, #ddd)' }}>
+                  第{h.version}版 · {fmtDateTime(h.at)}{h.by ? ` · ${h.by}` : ''}：{h.reason}
+                  {h.ackAt ? ` · 该版已由 ${h.ackBy} 于 ${fmtDateTime(h.ackAt)} 确认（后被新版替换）` : ' · 该版未确认即被新版替换'}
+                </div>
+              ))}
+            </details>
+          )}
         </div>
       ))}
     </div>

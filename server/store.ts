@@ -18,6 +18,11 @@ function load(): DB {
           if (!Array.isArray(s.closureIds)) s.closureIds = [];
           if (!Array.isArray(s.suspendedLanes)) s.suspendedLanes = [];
           if (!Array.isArray(s.guardFocusLanes)) s.guardFocusLanes = [];
+          // 兼容版本化前的关注泳道：补齐版本号与历史数组
+          for (const f of s.guardFocusLanes) {
+            if (typeof f.version !== 'number') f.version = 1;
+            if (!Array.isArray(f.history)) f.history = [];
+          }
         }
         return data;
       }

@@ -155,22 +155,6 @@ export interface SuspendedLane {
   rescueId: string;
 }
 
-/** 下一场救生巡查重点关注泳道（站位调整后自动带入后续场次） */
-export interface GuardFocusLane {
-  zoneId: ZoneId;
-  lane: number;
-  reason: string;
-  /** 来源救援记录 */
-  rescueId: string;
-  /** 来源场次 */
-  fromSessionId: string;
-  /** 生成时间 */
-  at: string;
-  /** 下一场救生员巡查确认已重点关注 */
-  ackAt?: string;
-  ackBy?: string;
-}
-
 export type LockReason = 'institution_rental' | 'coaching' | 'maintenance' | 'private_event';
 
 export interface ZoneLock {
@@ -270,12 +254,52 @@ export interface RescueClosureState {
   note?: string;
 }
 
-/** 站位调整（救援后记录：从哪个岗调整、加强哪个岗/哪条泳道） */
+/** 站位调整（救援后记录：从哪个岗调整、加强哪个岗/哪条泳道），每次调整为一个版本 */
 export interface CrampPostAdjustment {
+  /** 版本号，从 1 开始（同一救援的第 N 次调整 = 第 N 版站位策略） */
+  version: number;
   at: string;
   by: string;
   /** 调整说明，如「深水区瞭望台加派机动巡视，重点盯 3 号道」 */
   content: string;
+}
+
+/** 关注泳道的历史版本快照（含该版本当时的确认情况，审计留痕） */
+export interface GuardFocusLaneVersion {
+  version: number;
+  reason: string;
+  at: string;
+  by?: string;
+  /** 该版本被巡查确认的时间/人（被新策略替换前若已确认则保留） */
+  ackAt?: string;
+  ackBy?: string;
+}
+
+/** 下一场救生巡查重点关注泳道（站位调整后自动带入后续场次；多次调整按版本更新） */
+export interface GuardFocusLane {
+  zoneId: ZoneId;
+  lane: number;
+  /** 当前（最新）版本策略文案 */
+  reason: string;
+  /** 当前策略版本号，从 1 开始 */
+  version: number;
+  /** 来源救援记录 */
+  rescueId: string;
+  /** 来源场次 */
+  fromSessionId: string;
+  /** 首版生成时间 */
+  at: string;
+  /** 首版策略制定人 */
+  by?: string;
+  /** 最新版本时间 */
+  updatedAt?: string;
+  /** 最新版本制定人 */
+  updatedBy?: string;
+  /** 当前版本的巡查确认时间（出现新调整后清空，须重新确认） */
+  ackAt?: string;
+  ackBy?: string;
+  /** 历次版本及各版本确认留档（不含当前版本），按版本顺序 */
+  history: GuardFocusLaneVersion[];
 }
 
 /** 复盘结果：进入救生员培训 */

@@ -215,34 +215,64 @@ export function confirmRescueClosure(db: DB, user: User, rescueId: string, key: 
 }
 
 // ============ 3. 救生员站位调整（带动下一场关注泳道） ============
+/** 场次开始时刻（用于判断「尚未开始」，不回写进行中/已结束场次） */
+function sessionStartedAt(s: { date: string; start: string }): number {
+  return new Date(`${s.date}T${s.start}:00`).getTime();
+}
+
 export function adjustRescuePost(db: DB, user: User, rescueId: string, req: { content: string; propagateToNextSessions?: boolean }) {
   const content = String(req.content || '').trim();
   if (!content) throw new HttpError(400, '请填写站位调整内容');
   const rescue = getRescue(db, rescueId);
   const session = db.sessions.find((s) => s.id === rescue.sessionId)!;
 
-  rescue.adjustments.push({ at: now(), by: user.name, content: content.slice(0, 300) });
+  // 每次站位调整都是一个新版本（无论是否向下同步，调整本身按顺序留痕）
+  const version = rescue.adjustments.length + 1;
+  rescue.adjustments.push({ version, at: now(), by: user.name, content: content.slice(0, 300) });
 
   const propagate = req.propagateToNextSessions !== false;
-  let propagated: { id: string; label: string }[] = [];
+  /** 每个目标场的同步结果：新建 / 更新（是否因新版本而需重新确认） */
+  const targets: { id: string; label: string; status: 'created' | 'updated'; resetAck: boolean }[] = [];
   if (propagate) {
-    const later = db.sessions
-      .filter((s) => s.id !== session.id && (s.date > session.date || (s.date === session.date && s.start > session.start)))
+    // 仅同步严格晚于事发场次、且尚未开始的目标场；早于事发、进行中、已结束的场次一律不改写
+    const targetsSessions = db.sessions
+      .filter((s) => s.id !== session.id && sessionStartedAt(s) > Date.now())
       .sort((a, b) => a.date.localeCompare(b.date) || a.start.localeCompare(b.start));
-    for (const target of later) {
-      const exists = (target.guardFocusLanes ?? []).some((f) => f.rescueId === rescue.id && f.lane === rescue.lane && f.zoneId === rescue.zoneId);
-      if (exists) continue;
-      const focus: GuardFocusLane = {
-        zoneId: rescue.zoneId, lane: rescue.lane,
-        reason: `上场（${session.label}）该泳道发生抽筋救援 ${rescue.code}：${content}`,
-        rescueId: rescue.id, fromSessionId: session.id, at: now(),
-      };
-      target.guardFocusLanes = [...(target.guardFocusLanes ?? []), focus];
-      propagated.push({ id: target.id, label: target.label });
+    const reason = `上场（${session.label}）该泳道发生抽筋救援 ${rescue.code}，第${version}版站位策略：${content}`;
+    const at = now();
+    for (const target of targetsSessions) {
+      const lanes = target.guardFocusLanes ?? [];
+      const existing = lanes.find((f) => f.rescueId === rescue.id && f.lane === rescue.lane && f.zoneId === rescue.zoneId);
+      if (existing) {
+        // 归档旧版本（连同旧版本当时的确认情况），再刷新为最新策略并清空当前确认 → 须重新确认
+        existing.history.push({
+          version: existing.version, reason: existing.reason,
+          at: existing.at, by: existing.by, ackAt: existing.ackAt, ackBy: existing.ackBy,
+        });
+        const resetAck = !!existing.ackAt;
+        existing.reason = reason;
+        existing.version = version;
+        existing.updatedAt = at;
+        existing.updatedBy = user.name;
+        existing.ackAt = undefined;
+        existing.ackBy = undefined;
+        targets.push({ id: target.id, label: target.label, status: 'updated', resetAck });
+      } else {
+        const focus: GuardFocusLane = {
+          zoneId: rescue.zoneId, lane: rescue.lane, reason, version,
+          rescueId: rescue.id, fromSessionId: session.id, at, by: user.name, history: [],
+        };
+        target.guardFocusLanes = [...lanes, focus];
+        targets.push({ id: target.id, label: target.label, status: 'created', resetAck: false });
+      }
     }
+    const updated = targets.filter((t) => t.status === 'updated').length;
+    const reconfirm = targets.filter((t) => t.resetAck).length;
     pushNotification(db, {
-      title: `🛟 站位调整已同步：${rescue.code} 关注 ${zoneName(db, rescue.zoneId)} ${rescue.lane} 号道`,
-      body: `调整：${content}。已提醒后续 ${propagated.length} 个场次救生巡查重点关注同一泳道（${propagated.map((p) => p.label).join('、') || '无后续场次'}）。`,
+      title: `🛟 站位调整第${version}版已同步：${rescue.code} 关注 ${zoneName(db, rescue.zoneId)} ${rescue.lane} 号道`,
+      body: `最新策略：${content}。同步 ${targets.length} 个未开始场次（新建 ${targets.length - updated}、更新 ${updated}）；`
+        + (reconfirm > 0 ? `${reconfirm} 个场次此前已确认，按新版本须重新确认；` : '')
+        + `目标场次：${targets.map((p) => p.label).join('、') || '无未开始场次'}。`,
       level: 'warning', roles: ['lifeguard', 'ops'], sessionId: session.id,
     });
   }
@@ -251,11 +281,11 @@ export function adjustRescuePost(db: DB, user: User, rescueId: string, req: { co
     const inc = db.incidents.find((i) => i.id === rescue.incidentId);
     inc?.actions.push({
       id: nextId('ia'), at: now(), by: user.name, byRole: user.role,
-      content: `站位调整：${content}${propagate ? `（已带入后续 ${propagated.length} 个场次重点关注）` : ''}`,
+      content: `第${version}次站位调整：${content}${propagate ? `（已按版本同步 ${targets.length} 个未开始场次重点关注）` : ''}`,
     });
   }
 
-  return { rescue, propagated };
+  return { rescue, version, targets, propagated: targets };
 }
 
 /** 下一场救生巡查：救生员确认已关注该泳道 */
