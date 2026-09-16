@@ -589,9 +589,14 @@ export function changePoolStatus(db: DB, operator: string, req: {
 
   const affected: ClosureAffectedItem[] = [];
   const notificationIds: string[] = [];
-  let refundCount = 0;
-  let voucherCount = 0;
-  let refundTotal = 0;
+  // 按原支付渠道分别统计，互不混记
+  let walletRefundTotal = 0;
+  let walletRefundCount = 0;
+  let cashRefundTotal = 0;
+  let cashRefundCount = 0;
+  let originalVoucherReturnCount = 0;
+  let extraVoucherCount = 0;
+  let processedCount = 0;
 
   const pushN = (n: Omit<Notification, 'id' | 'at'>) => {
     db.notifications.unshift({ ...n, id: nextId('nt'), at: now() });
@@ -600,50 +605,99 @@ export function changePoolStatus(db: DB, operator: string, req: {
     return db.notifications[0];
   };
 
+  /** 逐居民聚合通知文案（一人多笔只发一条个人通知） */
+  const perUser = new Map<string, { texts: string[]; extra: boolean }>();
+
   for (const b of affectedBookings) {
     const u = db.users.find((x) => x.id === b.userId);
     if (!u) continue;
     const item: ClosureAffectedItem = {
       bookingId: b.id, bookingCode: b.code, userId: u.id, userName: u.name,
-      paidAmount: b.paidAmount, paymentMethod: b.paymentMethod, refunded: false, voucherGranted: false,
+      paidAmount: b.paidAmount, paymentMethod: b.paymentMethod, refunded: false,
+      refund: null, extraCompVoucher: false, voucherGranted: false,
     };
-    if (req.refund && b.paidAmount > 0) {
-      u.walletBalance = (u.walletBalance ?? 0) + b.paidAmount;
-      db.walletTxns.unshift({
-        id: nextId('tx'), at: now(), userId: u.id, amount: b.paidAmount,
-        reason: `第${toZh(seq)}轮闭池退费 ${b.code}（${reason}）`,
-        sessionId: session.id, closureId,
-      });
-      if (b.paymentMethod === 'voucher') u.compVouchers = (u.compVouchers ?? 0) + 1;
-      refundCount++;
-      refundTotal += b.paidAmount;
+
+    // 退款文案（按渠道准确表达，绝不再统一宣称“退回账户”）
+    let refundText = '';
+
+    if (req.refund) {
+      processedCount++;
       item.refunded = true;
+      if (b.paymentMethod === 'wallet' && b.paidAmount > 0) {
+        // 储值支付：仅退回储值余额
+        u.walletBalance = (u.walletBalance ?? 0) + b.paidAmount;
+        const tx = {
+          id: nextId('tx'), at: now(), userId: u.id, amount: b.paidAmount,
+          reason: `第${toZh(seq)}轮闭池原路退储值 ${b.code}（${reason}）`,
+          sessionId: session.id, closureId,
+        };
+        db.walletTxns.unshift(tx);
+        walletRefundTotal += b.paidAmount;
+        walletRefundCount++;
+        item.refund = { channel: 'wallet', refunded: true, amount: b.paidAmount, walletTxnId: tx.id };
+        refundText = `${b.paidAmount} 元已原路退回您的储值余额`;
+      } else if (b.paymentMethod === 'voucher') {
+        // 补偿券支付：只恢复原券，不产生任何金额流水
+        u.compVouchers = (u.compVouchers ?? 0) + 1;
+        originalVoucherReturnCount++;
+        item.refund = { channel: 'voucher', originalVoucherReturned: true, returnedCount: 1 };
+        refundText = '原预约使用的 1 张补偿券已返还至您的账户';
+      } else if (b.paymentMethod === 'cash' && b.paidAmount > 0) {
+        // 现场支付：不进储值，登记现场退款处理
+        cashRefundTotal += b.paidAmount;
+        cashRefundCount++;
+        const note = `凭预约码 ${b.code} 到前台办理现场退款 ${b.paidAmount} 元（原路为现场支付，不退入储值）`;
+        item.refund = { channel: 'cash', registered: true, amount: b.paidAmount, note };
+        refundText = note;
+      } else if (b.paidAmount === 0) {
+        // 公益免费场：无退款动作
+        item.refund = { channel: 'cash', registered: false, amount: 0, note: '公益免费预约，无需退款' };
+        refundText = '本场为公益免费预约，无需退款';
+      }
     }
+
+    // 额外补偿券：与“原券返还”严格分开
+    let extraText = '';
     if (req.compVoucher) {
       u.compVouchers = (u.compVouchers ?? 0) + 1;
-      voucherCount++;
+      extraVoucherCount++;
+      item.extraCompVoucher = true;
       item.voucherGranted = true;
       b.status = 'compensated';
+      extraText = '另额外发放 1 张补偿券（可抵一次入场，与原支付返还分开）';
     } else if (req.refund) {
       b.status = 'refunded';
     }
     b.closureIds = [...(b.closureIds ?? []), closureId];
 
     if (req.notifyResidents) {
-      const n = pushN({
-        title: `闭池通知（第${toZh(seq)}轮）：${session.label} 已${req.refund ? '退费' : '取消'}${req.compVoucher ? '并发放补偿券' : ''}`,
-        body: `闭池原因：${reason}。${req.refund ? `${b.paidAmount} 元已原路退回您的账户` : ''}${req.compVoucher ? '另发放 1 张补偿券（可抵一次入场）' : ''}。恢复开放时间将另行通知。`,
-        level: 'critical', roles: [], userId: u.id, sessionId: session.id, closureId,
-      });
-      item.notificationId = n.id;
+      // 收集该居民本笔预约的退款/补偿文案，循环后合并成一条个人通知
+      const lines: string[] = [];
+      if (req.refund && refundText) lines.push(refundText);
+      if (req.compVoucher && extraText) lines.push(extraText);
+      const agg = perUser.get(u.id) ?? { texts: [], extra: false };
+      agg.texts.push(`${b.code}：${lines.join('；') || '预约已取消'}`);
+      if (req.compVoucher) agg.extra = true;
+      perUser.set(u.id, agg);
     }
     affected.push(item);
+  }
+
+  // 每位受影响居民只发一条合并的个人通知（避免同一人多笔预约收到重复闭池通知）
+  for (const [uid, agg] of perUser) {
+    const n = pushN({
+      title: `闭池通知（第${toZh(seq)}轮）：${session.label} 已按原渠道退款${agg.extra ? '并发放额外补偿券' : ''}`,
+      body: `闭池原因：${reason}。您的受影响预约：${agg.texts.join('；')}。恢复开放时间将另行通知。`,
+      level: 'critical', roles: [], userId: uid, sessionId: session.id, closureId,
+    });
+    // 回写到该居民本轮的全部受影响条目
+    for (const a of affected) if (a.userId === uid) a.notificationId = n.id;
   }
 
   if (req.notifyResidents) {
     pushN({
       title: `【闭池·第${toZh(seq)}轮】${session.label}`, level: 'critical', roles: [],
-      body: `${reason}。已预约居民${req.refund ? '退费' : ''}${req.compVoucher ? '+补偿券' : ''}处理中，开放时间另行通知。`,
+      body: `${reason}。储值退款 ${walletRefundCount} 笔、原券返还 ${originalVoucherReturnCount} 张、现场退款登记 ${cashRefundCount} 笔${req.compVoucher ? `、额外补偿券 ${extraVoucherCount} 张` : ''}，开放时间另行通知。`,
       sessionId: session.id, closureId,
     });
   }
@@ -684,7 +738,7 @@ export function changePoolStatus(db: DB, operator: string, req: {
     if (inc) {
       inc.actions.push({
         id: nextId('ia'), at: now(), by: operator, byRole: 'ops',
-        content: `第${toZh(seq)}轮闭池联动已执行：退费 ${refundCount} 笔、补偿券 ${voucherCount} 张、复测与清场工单已派发、居民通知已发送。`,
+        content: `第${toZh(seq)}轮闭池联动已执行：储值退款 ${walletRefundCount} 笔、原券返还 ${originalVoucherReturnCount} 张、现场退款登记 ${cashRefundCount} 笔、额外补偿券 ${extraVoucherCount} 张、复测与清场工单已派发、居民通知已发送。`,
       });
       incidentIds.push(inc.id);
     }
@@ -696,7 +750,11 @@ export function changePoolStatus(db: DB, operator: string, req: {
     cause: req.cause ?? 'other', reason, closedAt: at, closedBy: operator,
     status: 'closed', requireWaterRetest: requireRetest,
     options: { refund: !!req.refund, compVoucher: !!req.compVoucher, notifyResidents: !!req.notifyResidents },
-    affected, refundTotal, refundCount, voucherCount,
+    affected,
+    walletRefundTotal, walletRefundCount,
+    cashRefundTotal, cashRefundCount,
+    originalVoucherReturnCount, extraVoucherCount,
+    refundCount: processedCount,
     announcementIds: notificationIds, guardReliefCount, taskIds, incidentIds,
   };
   db.closureRecords.unshift(record);
@@ -704,13 +762,16 @@ export function changePoolStatus(db: DB, operator: string, req: {
 
   pushN({
     title: `闭池处置完成（第${toZh(seq)}轮）：${session.label}`, level: 'critical', roles: STAFF_ROLES,
-    body: `退费 ${refundCount} 笔 / 补偿券 ${voucherCount} 张 / 复测与清场工单已派发 / 救生岗已撤。档案号 ${closureId}。`,
+    body: `储值退款 ${walletRefundCount} 笔(¥${walletRefundTotal}) / 原券返还 ${originalVoucherReturnCount} 张 / 现场退款登记 ${cashRefundCount} 笔(¥${cashRefundTotal}) / 额外补偿券 ${extraVoucherCount} 张 / 复测与清场工单已派发 / 救生岗已撤。档案号 ${closureId}。`,
     sessionId: session.id, closureId,
   });
 
   return {
-    session, closure: record, refundCount, voucherCount,
-    affected: affected.length, refundTotal, reopened: false as const,
+    session, closure: record,
+    walletRefundTotal, walletRefundCount,
+    cashRefundTotal, cashRefundCount,
+    originalVoucherReturnCount, extraVoucherCount,
+    affected: affected.length, reopened: false as const,
   };
 }
 

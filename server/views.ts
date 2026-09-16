@@ -24,7 +24,10 @@ function patronCard(u: User): PatronCard {
 }
 
 function visibleNotification(n: Notification, role: Role, userId: string) {
-  return n.roles.length === 0 || n.roles.includes(role) || n.userId === userId;
+  // 运营负责退款/通知核对，可见全部（含逐人通知）；个人通知其余角色仅本人可见
+  if (role === 'ops') return true;
+  if (n.userId) return n.userId === userId;
+  return n.roles.length === 0 || n.roles.includes(role);
 }
 
 /** 非前台/运营角色不得看到锁区联系人（机构对接电话属于运营/前台职责数据） */

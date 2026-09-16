@@ -98,7 +98,7 @@ check('闭池联动成功', close.status === 200, JSON.stringify(close.data));
 
 const li2 = (await api('/state', t.li, undefined, 'GET')).data;
 const zhang2 = (await api('/state', t.zhang, undefined, 'GET')).data;
-check('li 只看到本人的闭池退费流水', li2.walletTxns.some((x) => x.amount > 0 && x.reason.includes('闭池退费') && x.userId === 'u-li'));
+check('li 只看到本人的闭池退费流水', li2.walletTxns.some((x) => x.amount > 0 && /闭池.*退储值|退储值/.test(x.reason) && x.userId === 'u-li'));
 check('li 看不到 zhang 的退费', !JSON.stringify(li2).includes('B-2061'));
 check('li 收到本人闭池通知（含其金额）', li2.notifications.some((n) => n.userId === 'u-li' && n.title.includes('闭池通知')));
 check('li 本人预约为退费+补偿状态', li2.bookings.some((b) => b.code === 'B-2062' && b.status === 'compensated'));

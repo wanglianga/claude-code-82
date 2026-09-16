@@ -3,9 +3,12 @@ import type { User, Notification } from '../../shared/types.js';
 import { fmtDateTime } from '../ui.js';
 
 export function visibleNotifications(user: User, all: Notification[]) {
-  return all.filter((n) =>
-    n.roles.length === 0 || n.roles.includes(user.role) || n.userId === user.id,
-  );
+  return all.filter((n) => {
+    // 运营可见全部通知（含逐人退款核对）；个人通知其余角色仅本人可见
+    if (user.role === 'ops') return true;
+    if (n.userId) return n.userId === user.id;
+    return n.roles.length === 0 || n.roles.includes(user.role);
+  });
 }
 
 export function NotifyBell({ user, notifications }: { user: User; notifications: Notification[] }) {

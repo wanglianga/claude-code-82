@@ -315,15 +315,47 @@ export interface Notification {
 }
 
 // ============ 闭池处置档案（不可变快照，同场次可多次闭池） ============
+
+/** 储值渠道退款结果 */
+export interface WalletRefundResult {
+  channel: 'wallet';
+  refunded: boolean;
+  amount: number;
+  walletTxnId?: string;
+}
+/** 补偿券渠道：仅返还原券，不产生任何金额流水 */
+export interface VoucherRefundResult {
+  channel: 'voucher';
+  /** 原预约消耗的补偿券是否已返还 */
+  originalVoucherReturned: boolean;
+  returnedCount: number;
+}
+/** 现场支付渠道：不进储值，只登记现场退款处理结果 */
+export interface OnSiteRefundResult {
+  channel: 'cash';
+  registered: boolean;
+  amount: number;
+  /** 现场退款处理说明（凭预约码到前台办理等） */
+  note: string;
+}
+export type RefundResult = WalletRefundResult | VoucherRefundResult | OnSiteRefundResult;
+
 export interface ClosureAffectedItem {
   bookingId: string;
   bookingCode: string;
   userId: string;
   userName?: string;
   paidAmount: number;
+  /** 原支付渠道，退款严格按该渠道分别处理 */
   paymentMethod: Booking['paymentMethod'];
+  /** 是否执行了原渠道退款/返还 */
   refunded: boolean;
-  voucherGranted: boolean;
+  /** 原渠道退款结果（储值 / 原券返还 / 现场登记，互斥） */
+  refund: RefundResult | null;
+  /** 是否发放了「额外」补偿券（与补偿券预约的原券返还分开统计） */
+  extraCompVoucher: boolean;
+  /** 兼容旧字段：等价于 extraCompVoucher */
+  voucherGranted?: boolean;
   /** 该居民收到的逐人通知 id */
   notificationId?: string;
 }
@@ -346,9 +378,18 @@ export interface ClosureRecord {
   options: { refund: boolean; compVoucher: boolean; notifyResidents: boolean };
   /** 受影响预约与逐人退费/补偿结果快照 */
   affected: ClosureAffectedItem[];
-  refundTotal: number;
+  /** 退回储值余额的金额合计与笔数（仅 wallet 渠道，voucher/cash 不计入） */
+  walletRefundTotal: number;
+  walletRefundCount: number;
+  /** 现场支付退款登记金额与笔数（不进储值） */
+  cashRefundTotal: number;
+  cashRefundCount: number;
+  /** 补偿券预约的原券返还张数 */
+  originalVoucherReturnCount: number;
+  /** 额外补偿券张数（与原券返还分开） */
+  extraVoucherCount: number;
+  /** 兼容旧汇总：受影响且执行退款/返还的总笔数 */
   refundCount: number;
-  voucherCount: number;
   /** 全员公告 + 岗位通知 id */
   announcementIds: string[];
   /** 撤哨救生员人数 */

@@ -57,7 +57,7 @@ check('生成 1 份闭池档案', recs.length === 1);
 const rec1 = recs[0];
 check('档案序号=1', rec1.seq === 1);
 check('档案原因固化为雷雨', rec1.cause === 'thunderstorm' && rec1.reason.includes('雷电'));
-check('档案含退费/补偿结果', rec1.refundCount >= 1 && rec1.voucherCount >= 1 && rec1.refundTotal > 0, JSON.stringify({ c: rec1.refundCount, v: rec1.voucherCount, t: rec1.refundTotal }));
+check('档案含分渠道退费/补偿结果', rec1.walletRefundTotal > 0 && rec1.originalVoucherReturnCount >= 1 && rec1.extraVoucherCount >= 1 && rec1.cashRefundTotal >= 0, JSON.stringify({ w: rec1.walletRefundTotal, ov: rec1.originalVoucherReturnCount, ev: rec1.extraVoucherCount, cash: rec1.cashRefundTotal }));
 check('档案含逐人受影响快照', rec1.affected.length >= 1 && rec1.affected.every((a) => a.bookingCode && a.paymentMethod));
 check('档案关联清场/复测工单', rec1.taskIds.length === 2);
 check('档案关联通知', rec1.announcementIds.length >= 2);
@@ -66,8 +66,9 @@ check('钱包流水引用闭池档案 id', st.walletTxns.some((t) => t.closureId
 const rec1Snapshot = JSON.stringify({
   id: rec1.id, seq: rec1.seq, cause: rec1.cause, reason: rec1.reason,
   closedAt: rec1.closedAt, closedBy: rec1.closedBy, options: rec1.options,
-  affected: rec1.affected, refundTotal: rec1.refundTotal, refundCount: rec1.refundCount,
-  voucherCount: rec1.voucherCount, taskIds: rec1.taskIds, announcementIds: rec1.announcementIds,
+  affected: rec1.affected, walletRefundTotal: rec1.walletRefundTotal, walletRefundCount: rec1.walletRefundCount,
+  cashRefundTotal: rec1.cashRefundTotal, originalVoucherReturnCount: rec1.originalVoucherReturnCount,
+  extraVoucherCount: rec1.extraVoucherCount, taskIds: rec1.taskIds, announcementIds: rec1.announcementIds,
   guardReliefCount: rec1.guardReliefCount, incidentIds: rec1.incidentIds,
 });
 
@@ -135,11 +136,12 @@ check('第一轮仍是已恢复状态、保留复测依据', recs[0].status === 
 check('第一轮固化的处置字段未被第二轮覆盖', JSON.stringify({
   id: recs[0].id, seq: recs[0].seq, cause: recs[0].cause, reason: recs[0].reason,
   closedAt: recs[0].closedAt, closedBy: recs[0].closedBy, options: recs[0].options,
-  affected: recs[0].affected, refundTotal: recs[0].refundTotal, refundCount: recs[0].refundCount,
-  voucherCount: recs[0].voucherCount, taskIds: recs[0].taskIds, announcementIds: recs[0].announcementIds,
+    affected: recs[0].affected, walletRefundTotal: recs[0].walletRefundTotal, walletRefundCount: recs[0].walletRefundCount,
+    cashRefundTotal: recs[0].cashRefundTotal, originalVoucherReturnCount: recs[0].originalVoucherReturnCount,
+    extraVoucherCount: recs[0].extraVoucherCount, taskIds: recs[0].taskIds, announcementIds: recs[0].announcementIds,
   guardReliefCount: recs[0].guardReliefCount, incidentIds: recs[0].incidentIds,
 }) === rec1Snapshot);
-check('第一轮退费总额与笔数保留', recs[0].refundTotal === rec1After.refundTotal && recs[0].affected.length === rec1After.affected.length);
+check('第一轮分渠道退款汇总保留', recs[0].walletRefundTotal === rec1After.walletRefundTotal && recs[0].originalVoucherReturnCount === rec1After.originalVoucherReturnCount && recs[0].affected.length === rec1After.affected.length);
 check('场次指向第二轮生效档案', st.sessions.find((s) => s.id === 's-mid').activeClosureId === rec2.id);
 
 console.log('⑤ 第二轮同样须三项齐备：仅水质达标先拒绝 → 完成工单 → 恢复');

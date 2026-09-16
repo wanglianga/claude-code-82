@@ -57,7 +57,7 @@ function buildTimeline(state: AppState, sessionId: string): TL[] {
   for (const r of closureRecords) {
     tl.push({
       at: r.closedAt,
-      title: `第${zh(r.seq)}轮闭池：${r.reason}（退费 ${r.refundCount} 笔/¥${r.refundTotal}、补偿券 ${r.voucherCount} 张、撤哨 ${r.guardReliefCount} 人、通知 ${r.announcementIds.length} 条、处置档案 ${r.id}）`,
+      title: `第${zh(r.seq)}轮闭池：${r.reason}（储值退 ${r.walletRefundCount} 笔/¥${r.walletRefundTotal}、原券返还 ${r.originalVoucherReturnCount} 张、现场退款登记 ${r.cashRefundCount} 笔/¥${r.cashRefundTotal}、额外补偿券 ${r.extraVoucherCount} 张、撤哨 ${r.guardReliefCount} 人、通知 ${r.announcementIds.length} 条、档案 ${r.id}）`,
       tone: 'danger', who: `${r.closedBy}·闭池档案`,
     });
     if (r.status === 'reopened' && r.reopenedAt) {
@@ -73,6 +73,15 @@ function buildTimeline(state: AppState, sessionId: string): TL[] {
 
 function zh(n: number) {
   return ['零', '一', '二', '三', '四', '五', '六', '七', '八', '九', '十'][n] ?? String(n);
+}
+
+/** 按原支付渠道描述退款/返还结果（财务结算与居民通知口径一致） */
+function refundResultText(a: import('../../shared/types.js').ClosureAffectedItem) {
+  if (!a.refunded || !a.refund) return '未退款';
+  const r = a.refund;
+  if (r.channel === 'wallet') return `已退储值 ¥${r.amount}`;
+  if (r.channel === 'voucher') return `原补偿券已返还 ${r.returnedCount} 张（无金额流水）`;
+  return r.amount > 0 ? `现场退款登记 ¥${r.amount}` : (r.note || '公益免费无需退款');
 }
 
 function Command({ state }: Props) {
@@ -300,7 +309,9 @@ function CloseReopen({ state, user }: Props) {
 
   const session = state.sessions.find((s) => s.id === sessionId)!;
   const affected = state.bookings.filter((b) => b.sessionId === sessionId && (b.status === 'booked' || b.status === 'checked_in'));
-  const refundAmount = affected.reduce((s, b) => s + b.paidAmount, 0);
+  const estWallet = affected.filter((b) => b.paymentMethod === 'wallet').reduce((s, b) => s + b.paidAmount, 0);
+  const estVoucher = affected.filter((b) => b.paymentMethod === 'voucher').length;
+  const estCash = affected.filter((b) => b.paymentMethod === 'cash').reduce((s, b) => s + b.paidAmount, 0);
 
   // 恢复门禁以“当前生效闭池档案”为唯一依据（清场清洁 + 消毒复测 + 必要的达标水质）
   const activeRecord = state.closureRecords.find((r) => r.id === session.activeClosureId);
@@ -327,7 +338,7 @@ function CloseReopen({ state, user }: Props) {
 
   const close = () =>
     act.mutateAsync({ path: '/pool-status', body: { sessionId, status: 'closed', reason, cause, refund, compVoucher: voucher, notifyResidents: push, requireWaterRetest: retest } })
-      .then((r: any) => notify.ok(`闭池联动完成：退费 ${r.refundCount ?? 0} 笔、券 ${r.voucherCount ?? 0} 张`)).catch((e) => notify.err(e));
+      .then((r: any) => notify.ok(`闭池联动完成：储值退 ${r.walletRefundCount ?? 0} 笔、原券返还 ${r.originalVoucherReturnCount ?? 0} 张、现场登记 ${r.cashRefundCount ?? 0} 笔、额外补偿券 ${r.extraVoucherCount ?? 0} 张`)).catch((e) => notify.err(e));
   const reopen = () =>
     act.mutateAsync({ path: '/pool-status', body: { sessionId, status: 'normal' } })
       .then(() => notify.ok('已恢复开放，居民端/现场端状态同步刷新')).catch((e) => notify.err(e));
@@ -384,7 +395,7 @@ function CloseReopen({ state, user }: Props) {
               <label className="checkbox"><input type="checkbox" checked={push} onChange={(e) => setPush(e.target.checked)} /> 向受影响居民逐人推送通知 + 全员公告</label>
               <label className="checkbox"><input type="checkbox" checked={retest} onChange={(e) => setRetest(e.target.checked)} /> 要求水质复测达标后方可恢复开放</label>
               <div className="alert warn" style={{ marginTop: 10 }}>
-                本次将影响 <b>{affected.length}</b> 笔预约、退款合计约 <b>¥{refundAmount}</b>；同时自动：救生员撤哨清场、生成维修消毒复测工单与保洁清场工单、关联事件追加联动记录。
+                本次将影响 <b>{affected.length}</b> 笔预约，按原渠道分别处理：储值退 <b>¥{estWallet}</b>、原券返还 <b>{estVoucher}</b> 张、现场退款登记 <b>¥{estCash}</b>{voucher ? '，另每人发放额外补偿券 1 张' : ''}；同时自动：救生员撤哨清场、生成维修消毒复测工单与保洁清场工单、关联事件追加联动记录。
               </div>
               <button className="btn danger" disabled={!reason.trim() || act.isPending} onClick={() => { if (confirm('确认闭池并执行联动？居民将立即收到通知。')) close(); }}>🚫 确认闭池并执行联动</button>
             </div>
@@ -432,7 +443,10 @@ function ClosureArchives({ state, sessionId }: { state: AppState; sessionId: str
             <div className="small" style={{ marginTop: 4 }}>原因：{r.reason}</div>
             <dl className="kv small" style={{ marginTop: 6 }}>
               <dt>闭池时间</dt><dd>{fmtDateTime(r.closedAt)} · {r.closedBy}</dd>
-              <dt>退费补偿</dt><dd>{r.refundCount} 笔 / ¥{r.refundTotal} · 补偿券 {r.voucherCount} 张</dd>
+              <dt>原渠道退款</dt>
+              <dd>储值 {r.walletRefundCount} 笔/¥{r.walletRefundTotal} · 原券返还 {r.originalVoucherReturnCount} 张 · 现场登记 {r.cashRefundCount} 笔/¥{r.cashRefundTotal}
+                {r.extraVoucherCount > 0 && <span className="badge purple" style={{ marginLeft: 6 }}>额外补偿券 {r.extraVoucherCount} 张</span>}
+              </dd>
               <dt>清场</dt><dd>撤哨 {r.guardReliefCount} 人 · 联动工单 {r.taskIds.length} 个</dd>
               <dt>通知</dt><dd>{r.announcementIds.length} 条（全员公告+逐人通知）</dd>
               <dt>恢复门禁</dt>
@@ -444,11 +458,15 @@ function ClosureArchives({ state, sessionId }: { state: AppState; sessionId: str
             <details style={{ marginTop: 6 }}>
               <summary className="small muted" style={{ cursor: 'pointer' }}>逐人处置结果（{r.affected.length}）</summary>
               <div className="table-wrap" style={{ marginTop: 6 }}><table>
-                <thead><tr><th>预约码</th><th>泳客</th><th>退费</th><th>补偿券</th><th>通知</th></tr></thead>
+                <thead><tr><th>预约码</th><th>泳客</th><th>原渠道</th><th>原渠道退款结果</th><th>额外补偿券</th><th>通知</th></tr></thead>
                 <tbody>{r.affected.map((a) => (
-                  <tr key={a.bookingId}><td className="code-mono small">{a.bookingCode}</td><td className="small">{a.userName}</td>
-                    <td>{a.refunded ? `¥${a.paidAmount}` : '—'}</td><td>{a.voucherGranted ? '1 张' : '—'}</td>
-                    <td>{a.notificationId ? '已送达' : '—'}</td></tr>
+                  <tr key={a.bookingId}>
+                    <td className="code-mono small">{a.bookingCode}</td><td className="small">{a.userName}</td>
+                    <td>{a.paymentMethod === 'wallet' ? '储值' : a.paymentMethod === 'voucher' ? '补偿券' : '现场支付'}</td>
+                    <td className="small">{refundResultText(a)}</td>
+                    <td>{a.extraCompVoucher ? '1 张' : '—'}</td>
+                    <td>{a.notificationId ? '已送达' : '—'}</td>
+                  </tr>
                 ))}</tbody></table></div>
             </details>
             <div className="small muted" style={{ marginTop: 4 }}>档案号 {r.id}</div>

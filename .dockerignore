@@ -5,6 +5,7 @@ data
 e2e-check.mjs
 privacy-check.mjs
 multi-closure-check.mjs
+payment-closure-check.mjs
 *.log
 .git
 .gitignore

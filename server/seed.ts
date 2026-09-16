@@ -21,7 +21,7 @@ export function seed(): DB {
 
   const users: User[] = [
     // ---- 居民 ----
-    { id: 'u-zhang', username: 'zhang', password: '123456', name: '张为民', role: 'resident', phone: '13800000001', memberTier: 'gold', deepCert: true, walletBalance: 320, compVouchers: 1, age: 42 },
+    { id: 'u-zhang', username: 'zhang', password: '123456', name: '张为民', role: 'resident', phone: '13800000001', memberTier: 'gold', deepCert: true, walletBalance: 320, compVouchers: 0, age: 42 },
     { id: 'u-li', username: 'li', password: '123456', name: '李娟', role: 'resident', phone: '13800000002', memberTier: 'silver', deepCert: false, walletBalance: 80, compVouchers: 0, age: 35 },
     { id: 'u-wang', username: 'wang', password: '123456', name: '王建国', role: 'resident', phone: '13800000003', memberTier: 'normal', deepCert: false, walletBalance: 0, compVouchers: 0, age: 68 },
     { id: 'u-zhao', username: 'zhao', password: '123456', name: '赵晓（访客）', role: 'resident', phone: '13800000004', memberTier: 'guest', deepCert: false, walletBalance: 0, compVouchers: 0, age: 29 },
